@@ -1,0 +1,7 @@
+# Workbench / packing output
+*.pak
+*.bin
+Prefabs/**/*.et.meta.bak
+.vs/
+*.pyc
+__pycache__/
