@@ -47,6 +47,7 @@ class ARIA_GroupBrain
 	protected float m_fLastBroadcast = -1000;
 	protected int m_iPeakStrength;
 	protected float m_fDefaultAutonomousDistance = -1;
+	protected bool m_bHoldActive;
 
 	// Current ARIA order (weak: the vanilla utility component owns the activity)
 	protected SCR_AIActivityBase m_Order;
@@ -81,8 +82,6 @@ class ARIA_GroupBrain
 		m_Group = group;
 		m_Utility = group.GetGroupUtilityComponent();
 		m_iPeakStrength = group.GetAgentsCount();
-		if (m_Utility)
-			m_fDefaultAutonomousDistance = m_Utility.GetMaxAutonomousDistance();
 	}
 
 	//==============================================================================================
@@ -179,11 +178,16 @@ class ARIA_GroupBrain
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Safe to call when the group was already deleted (vanilla deletes empty groups).
 	void Release()
 	{
 		ClearOrder();
 		RestoreAutonomousDistance();
 		ReleaseStaticWeapon();
+		if (m_BorrowedVehicle)
+			ARIA_VehicleUtils.Unclaim(m_BorrowedVehicle);
+
+		m_BorrowedVehicle = null;
 		if (m_eState == ARIA_ESquadState.AIRLIFT)
 			RestoreWaypoints();
 	}
@@ -208,6 +212,10 @@ class ARIA_GroupBrain
 
 		// Crew squads of helicopters are driven by their ARIA_HeliPilot
 		if (m_Helicopter && m_Helicopter.IsValid())
+			return;
+
+		// Passengers of an ARIA helicopter must not get move orders mid-air
+		if (m_eState != ARIA_ESquadState.AIRLIFT && IsRidingAriaHelicopter())
 			return;
 
 		if (m_eState == ARIA_ESquadState.AIRLIFT)
@@ -621,7 +629,7 @@ class ARIA_GroupBrain
 		if (!IsValid() || m_eState != ARIA_ESquadState.IDLE)
 			return false;
 
-		if (m_Helicopter || IsUnderDirectOrders())
+		if (m_Helicopter || IsUnderDirectOrders() || IsRidingAriaHelicopter())
 			return false;
 
 		return m_Group.GetAgentsCount() >= 2;
@@ -783,8 +791,11 @@ class ARIA_GroupBrain
 	{
 		m_AirliftHeli = null;
 		ClearOrder();
-		RestoreWaypoints();
 		SetState(ARIA_ESquadState.IDLE, now);
+		if (!m_Group)
+			return;
+
+		RestoreWaypoints();
 		m_LogisticsWaypoint = m_Group.GetCurrentWaypoint();
 	}
 
@@ -841,6 +852,13 @@ class ARIA_GroupBrain
 	//------------------------------------------------------------------------------------------------
 	protected void RestoreWaypoints()
 	{
+		if (!m_Group)
+		{
+			m_aStashedWaypoints.Clear();
+			m_aStashedPositions.Clear();
+			return;
+		}
+
 		for (int i = 0; i < m_aStashedPositions.Count(); i++)
 		{
 			AIWaypoint waypoint;
@@ -912,9 +930,11 @@ class ARIA_GroupBrain
 	{
 		if (m_Order)
 		{
+			// Fail() (not SetActionState) so vanilla runs OnActionFailed: soldiers get cancel
+			// messages and reserved seats / group vehicles are released.
 			EAIActionState state = m_Order.GetActionState();
 			if (state != EAIActionState.COMPLETED && state != EAIActionState.FAILED)
-				m_Order.SetActionState(EAIActionState.FAILED);
+				m_Order.Fail();
 		}
 
 		m_Order = null;
@@ -950,12 +970,22 @@ class ARIA_GroupBrain
 	//! Keeps members close instead of chasing contacts (hold & suppress).
 	protected void SetHoldPosition()
 	{
+		// Remember the value in force right now (Scenario Framework may have changed it)
+		if (!m_bHoldActive)
+			m_fDefaultAutonomousDistance = m_Utility.GetMaxAutonomousDistance();
+
+		m_bHoldActive = true;
 		m_Utility.SetMaxAutonomousDistance(40);
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Only undoes our own change, never overwrites values set by the scenario.
 	protected void RestoreAutonomousDistance()
 	{
+		if (!m_bHoldActive)
+			return;
+
+		m_bHoldActive = false;
 		if (m_Utility && m_fDefaultAutonomousDistance > 0)
 			m_Utility.SetMaxAutonomousDistance(m_fDefaultAutonomousDistance);
 	}
@@ -1006,6 +1036,22 @@ class ARIA_GroupBrain
 		}
 
 		return strength;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! True when a member sits in a helicopter flown by ARIA (passengers, not crew).
+	protected bool IsRidingAriaHelicopter()
+	{
+		array<AIAgent> agents = {};
+		m_Group.GetAgents(agents);
+		foreach (AIAgent agent : agents)
+		{
+			IEntity vehicle = ARIA_EntityUtils.GetVehicle(agent.GetControlledEntity());
+			if (vehicle && m_Manager.FindHeliPilot(vehicle))
+				return true;
+		}
+
+		return false;
 	}
 
 	//------------------------------------------------------------------------------------------------

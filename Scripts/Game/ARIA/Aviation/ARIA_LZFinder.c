@@ -12,6 +12,7 @@ class ARIA_LZSearch
 	protected float m_fClearRadius;
 	protected float m_fMaxSlope;
 	protected IEntity m_Exclude;
+	protected ref array<vector> m_aBlacklist = {};
 
 	protected int m_iRing;
 	protected int m_iIndex;
@@ -30,6 +31,20 @@ class ARIA_LZSearch
 		m_fClearRadius = clearRadius;
 		m_fMaxSlope = maxSlopeDeg;
 		m_Exclude = exclude;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Spots where a landing already failed; candidates within 25 m of them are rejected.
+	void SetBlacklist(array<vector> blacklist)
+	{
+		m_aBlacklist.Clear();
+		if (!blacklist)
+			return;
+
+		foreach (vector spot : blacklist)
+		{
+			m_aBlacklist.Insert(spot);
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -118,6 +133,12 @@ class ARIA_LZSearch
 	//------------------------------------------------------------------------------------------------
 	protected bool IsSuitable(vector candidate)
 	{
+		foreach (vector spot : m_aBlacklist)
+		{
+			if (ARIA_Math.HorizontalDistance(spot, candidate) < 25)
+				return false;
+		}
+
 		if (ARIA_WorldQuery.IsWater(candidate))
 			return false;
 

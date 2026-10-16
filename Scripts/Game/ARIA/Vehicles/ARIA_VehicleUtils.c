@@ -4,8 +4,11 @@
 
 class ARIA_VehicleUtils
 {
-	//! Vehicles currently borrowed by a squad, so two squads do not race for the same one.
+	//! Vehicles recently claimed by a squad, so two squads do not race for the same one.
+	//! Claims expire: once boarded, the occupant check keeps the vehicle unavailable anyway.
 	protected static ref array<IEntity> s_aClaimedVehicles = {};
+	protected static ref array<float> s_aClaimTimes = {};
+	protected static const float CLAIM_TTL_MS = 120000;
 
 	//------------------------------------------------------------------------------------------------
 	static bool IsHelicopter(IEntity vehicle)
@@ -261,29 +264,44 @@ class ARIA_VehicleUtils
 	static void Claim(IEntity vehicle)
 	{
 		PruneClaims();
-		if (vehicle && !s_aClaimedVehicles.Contains(vehicle))
-			s_aClaimedVehicles.Insert(vehicle);
+		if (!vehicle)
+			return;
+
+		Unclaim(vehicle);
+		s_aClaimedVehicles.Insert(vehicle);
+		s_aClaimTimes.Insert(GetGame().GetWorld().GetWorldTime());
 	}
 
 	//------------------------------------------------------------------------------------------------
 	static void Unclaim(IEntity vehicle)
 	{
-		s_aClaimedVehicles.RemoveItem(vehicle);
+		int index = s_aClaimedVehicles.Find(vehicle);
+		if (index < 0)
+			return;
+
+		s_aClaimedVehicles.RemoveOrdered(index);
+		s_aClaimTimes.RemoveOrdered(index);
 	}
 
 	//------------------------------------------------------------------------------------------------
 	static bool IsClaimed(IEntity vehicle)
 	{
+		PruneClaims();
 		return s_aClaimedVehicles.Contains(vehicle);
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Drops deleted vehicles and expired claims.
 	protected static void PruneClaims()
 	{
+		float now = GetGame().GetWorld().GetWorldTime();
 		for (int i = s_aClaimedVehicles.Count() - 1; i >= 0; i--)
 		{
-			if (!s_aClaimedVehicles[i])
-				s_aClaimedVehicles.Remove(i);
+			if (!s_aClaimedVehicles[i] || now - s_aClaimTimes[i] > CLAIM_TTL_MS)
+			{
+				s_aClaimedVehicles.RemoveOrdered(i);
+				s_aClaimTimes.RemoveOrdered(i);
+			}
 		}
 	}
 

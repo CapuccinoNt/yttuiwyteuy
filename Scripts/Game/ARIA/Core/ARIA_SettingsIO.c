@@ -18,7 +18,7 @@ class ARIA_SettingsIO
 		if (!FileIO.FileExists(FILE_PATH))
 		{
 			settings.ApplyPreset(settings.m_sPreset);
-			Save(settings);
+			Save(settings, true);
 			ARIA_Log.Info("No settings file found, wrote defaults to " + FILE_PATH);
 			return settings;
 		}
@@ -60,11 +60,13 @@ class ARIA_SettingsIO
 	}
 
 	//------------------------------------------------------------------------------------------------
-	static bool Save(ARIA_Settings settings)
+	//! \param asDefaults true = first-start file: preset-driven values are written commented out
+	static bool Save(ARIA_Settings settings, bool asDefaults = false)
 	{
 		FileIO.MakeDirectory(DIRECTORY);
 
 		ARIA_ConfigVisitor visitor = new ARIA_ConfigVisitor(ARIA_EConfigMode.SAVE);
+		visitor.AllowCommentedValues(asDefaults);
 		settings.Visit(visitor);
 
 		FileHandle file = FileIO.OpenFile(FILE_PATH, FileMode.WRITE);

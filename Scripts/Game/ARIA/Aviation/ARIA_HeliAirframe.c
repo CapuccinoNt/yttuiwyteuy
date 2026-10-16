@@ -109,6 +109,43 @@ class ARIA_HeliAirframe
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! While ARIA flies, the native rotors keep spinning (visuals, sound, damage) but produce no
+	//! lift or torque, so the controller is the only thing moving the airframe. Re-applied every
+	//! decision because starting the engine may reset the scales to the prefab defaults.
+	void SetNativeRotorSuppressed(bool suppressed)
+	{
+		float scale = 1;
+		if (suppressed)
+			scale = 0;
+
+		int count = m_Simulation.RotorCount();
+		for (int i = 0; i < count; i++)
+		{
+			m_Simulation.RotorSetForceScaleState(i, scale);
+			m_Simulation.RotorSetTorqueScaleState(i, scale);
+		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Keeps the engine at full throttle while ARIA is in control.
+	void MaintainThrottle()
+	{
+		if (m_Controller.IsEngineOn())
+			m_Simulation.SetThrottle(1);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Gives the airframe back to the native simulation (crash naturally / player control).
+	void ReleaseControl()
+	{
+		if (!IsValid())
+			return;
+
+		SetNativeRotorSuppressed(false);
+		m_Controller.SetPersistentWheelBrake(false);
+	}
+
+	//------------------------------------------------------------------------------------------------
 	void StartEngine()
 	{
 		if (!m_Controller.IsEngineOn())

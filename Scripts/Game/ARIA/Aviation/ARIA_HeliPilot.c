@@ -70,12 +70,18 @@ class ARIA_HeliPilot
 
 	protected float m_fOrbitDirection = 1;
 	protected bool m_bIdleLoiter;
+	protected bool m_bStandDown;
+
+	// Landing retries
+	protected int m_iLandingFailures;
+	protected ref array<vector> m_aLZBlacklist = {};
 
 	protected static const float DECISION_INTERVAL = 0.25;
 	protected static const float TAKEOFF_ALTITUDE = 15;
 	protected static const float APPROACH_ALTITUDE = 30;
 	protected static const float LANDED_IDLE_SHUTDOWN = 45;
 	protected static const float LOITER_RADIUS = 300;
+	protected static const int MAX_LANDING_ATTEMPTS = 3;
 
 	//------------------------------------------------------------------------------------------------
 	void ARIA_HeliPilot(ARIA_Manager manager, IEntity helicopter, ARIA_GroupBrain crew)
@@ -90,13 +96,15 @@ class ARIA_HeliPilot
 		if (Math.RandomFloat(0, 1) < 0.5)
 			m_fOrbitDirection = -1;
 
-		if (!m_Airframe.IsValid())
+		// Never take over a wreck or a helicopter a player is flying
+		if (!m_Airframe.IsValid() || m_Airframe.IsCrippled() || (m_Pilot && IsPlayer(m_Pilot)))
 		{
 			m_bReleased = true;
 			return;
 		}
 
 		float now = manager.GetTime();
+		m_Airframe.SetNativeRotorSuppressed(true);
 		bool onGround = m_Airframe.GetAltitudeAGL() < 3;
 		if (onGround)
 		{
@@ -109,13 +117,13 @@ class ARIA_HeliPilot
 		}
 		else
 		{
-			// Spawned in the air (Game Master, scripted insertion...): keep flying
+			// Spawned in the air (Game Master, scripted insertion...): keep flying.
+			// Spool-up is marked only once the rotor really reaches its RPM (see Decide).
 			m_Airframe.StartEngine();
-			m_Airframe.MarkSpooledUp();
 			SetState(ARIA_EHeliState.FLYING, now);
 		}
 
-		AbsorbCrewWaypoints();
+		// Crew waypoints are absorbed on the first Decide(), after the pilot check passed
 	}
 
 	//==============================================================================================
@@ -293,6 +301,27 @@ class ARIA_HeliPilot
 
 		m_bReleased = true;
 		CancelAirOpsSquads();
+		if (m_Airframe)
+			m_Airframe.ReleaseControl();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! ARIA helicopters were disabled at runtime: land where possible, then hand control back.
+	void RequestStandDown()
+	{
+		if (m_bStandDown || !IsValid())
+			return;
+
+		m_bStandDown = true;
+		CancelAirOpsSquads();
+		ClearTasks();
+		m_bIdleLoiter = false;
+
+		bool airborne = m_eState == ARIA_EHeliState.TAKEOFF || m_eState == ARIA_EHeliState.FLYING || m_eState == ARIA_EHeliState.LANDING;
+		if (airborne)
+			m_aTasks.Insert(ARIA_HeliTask.Create(ARIA_EHeliTaskType.LAND, m_Helicopter.GetOrigin()));
+
+		ARIA_Log.Info(GetDebugName() + " standing down");
 	}
 
 	//==============================================================================================
@@ -319,7 +348,9 @@ class ARIA_HeliPilot
 		if (!CheckPilotAndAirframe(now))
 			return;
 
-		AbsorbCrewWaypoints();
+		if (!m_bStandDown)
+			AbsorbCrewWaypoints();
+
 		CheckThreat(now);
 
 		// Vanilla AI or a damaged starter may have stopped the engine: restart it while flying
@@ -327,10 +358,21 @@ class ARIA_HeliPilot
 		if (airborne && !m_Airframe.IsEngineOn())
 			m_Airframe.StartEngine();
 
+		m_Airframe.SetNativeRotorSuppressed(true);
+		m_Airframe.MaintainThrottle();
+		if (m_Airframe.IsEngineOn() && m_Airframe.GetRotorSpoolRatio() >= 0.9)
+			m_Airframe.MarkSpooledUp();
+
 		switch (m_eState)
 		{
 			case ARIA_EHeliState.PARKED:
 			{
+				if (m_bStandDown)
+				{
+					Disable(now);
+					return;
+				}
+
 				if (!m_aTasks.IsEmpty())
 				{
 					m_Airframe.StartEngine();
@@ -341,12 +383,11 @@ class ARIA_HeliPilot
 
 			case ARIA_EHeliState.STARTING:
 			{
+				// Take off once the rotor is at speed (spool-up is marked above), or after the
+				// timeout on airframes whose RPM data is unusual
 				float spoolUp = m_Manager.GetSettings().m_Heli.m_fSpoolUpTime;
 				if (m_Airframe.GetRotorSpoolRatio() >= 0.9 || now - m_fStateTime >= spoolUp)
-				{
-					m_Airframe.MarkSpooledUp();
 					BeginTakeoff(now);
-				}
 				break;
 			}
 
@@ -386,7 +427,11 @@ class ARIA_HeliPilot
 		ARIA_HeliTask task = GetCurrentTask(now);
 		if (!task)
 		{
-			StartIdleLoiter();
+			if (m_bStandDown)
+				m_aTasks.Insert(ARIA_HeliTask.Create(ARIA_EHeliTaskType.LAND, m_Helicopter.GetOrigin()));
+			else
+				StartIdleLoiter();
+
 			return;
 		}
 
@@ -455,6 +500,7 @@ class ARIA_HeliPilot
 			if (now - m_fTouchdownTime >= 0.75)
 			{
 				m_Airframe.HoldOnGround();
+				ResetLandingRetries();
 				SetState(ARIA_EHeliState.LANDED, now);
 
 				ARIA_HeliTask task = GetCurrentTask(now);
@@ -467,19 +513,68 @@ class ARIA_HeliPilot
 			m_fTouchdownTime = -1;
 		}
 
-		// Abort if something went wrong (blocked LZ, pushed away...)
+		// Abort if something went wrong (trees, roof, water, pushed away...): blacklist the spot,
+		// climb back to the approach altitude and search a wider area; give up after a few tries.
 		if (now - m_fStateTime > 60)
 		{
-			ARIA_Log.Debug(GetDebugName() + " landing aborted, searching a new LZ");
+			m_iLandingFailures++;
+			m_aLZBlacklist.Insert(m_vLZ);
 			ResetLZ();
+			m_Controller.Reset();
 			SetState(ARIA_EHeliState.FLYING, now);
+
+			if (m_iLandingFailures >= MAX_LANDING_ATTEMPTS)
+				AbandonLanding(now);
+			else
+				ARIA_Log.Debug(string.Format("%1 landing aborted (%2/%3), searching a new LZ", GetDebugName(), m_iLandingFailures, MAX_LANDING_ATTEMPTS));
 		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! No usable LZ: drop the landing and the ground tasks that depended on it.
+	protected void AbandonLanding(float now)
+	{
+		ARIA_Log.Warning(GetDebugName() + " could not find a place to land, skipping the landing");
+		bool removedLanding;
+		while (!m_aTasks.IsEmpty())
+		{
+			ARIA_HeliTask task = m_aTasks[0];
+			bool landing = task.m_eType == ARIA_EHeliTaskType.LAND || task.m_eType == ARIA_EHeliTaskType.RTB;
+			bool groundTask = task.m_eType == ARIA_EHeliTaskType.BOARD || task.m_eType == ARIA_EHeliTaskType.UNLOAD;
+			if (landing && removedLanding)
+				break;
+
+			if (!landing && !groundTask)
+				break;
+
+			if (task.m_Squad && task.m_Squad.IsValid() && task.m_eType == ARIA_EHeliTaskType.UNLOAD)
+				task.m_Squad.OnAirliftFinished(now);
+
+			removedLanding = removedLanding || landing;
+			m_aTasks.RemoveOrdered(0);
+		}
+
+		ResetLandingRetries();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected void ResetLandingRetries()
+	{
+		m_iLandingFailures = 0;
+		m_aLZBlacklist.Clear();
 	}
 
 	//------------------------------------------------------------------------------------------------
 	protected void DecideLanded(float now)
 	{
 		ARIA_HeliTask task = GetCurrentTask(now);
+		if (!task && m_bStandDown)
+		{
+			m_Airframe.StopEngine();
+			Disable(now);
+			return;
+		}
+
 		if (!task)
 		{
 			// Nothing to do: shut down after a while to save the engine (and the server)
@@ -534,7 +629,7 @@ class ARIA_HeliPilot
 				bool unloadTimedOut = task.m_fDuration >= 0 && now - task.m_fStartTime >= task.m_fDuration;
 				if (ArePassengersOut(task.m_Squad) || unloadTimedOut)
 				{
-					if (task.m_Squad)
+					if (task.m_Squad && task.m_Squad.IsValid())
 						task.m_Squad.OnAirliftFinished(now);
 
 					CompleteTask(now);
@@ -934,7 +1029,11 @@ class ARIA_HeliPilot
 
 		ARIA_HeliSettings cfg = m_Manager.GetSettings().m_Heli;
 		if (!m_LZSearch)
-			m_LZSearch = new ARIA_LZSearch(task.m_vPosition, cfg.m_fLZSearchRadius, cfg.m_fLZClearRadius, cfg.m_fLZMaxSlopeDeg, m_Helicopter);
+		{
+			float radius = cfg.m_fLZSearchRadius * (1 + m_iLandingFailures);
+			m_LZSearch = new ARIA_LZSearch(task.m_vPosition, radius, cfg.m_fLZClearRadius, cfg.m_fLZMaxSlopeDeg, m_Helicopter);
+			m_LZSearch.SetBlacklist(m_aLZBlacklist);
+		}
 
 		if (m_LZSearch.Step())
 		{
@@ -1100,6 +1199,7 @@ class ARIA_HeliPilot
 	{
 		CancelAirOpsSquads();
 		m_aTasks.Clear();
+		m_Airframe.ReleaseControl();
 		SetState(ARIA_EHeliState.DISABLED, now);
 	}
 

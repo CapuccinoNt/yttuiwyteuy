@@ -28,6 +28,7 @@ class ARIA_ConfigVisitor
 	protected ref array<string> m_aLines = {};
 	protected string m_sPrefix;
 	protected bool m_bCommentValues;
+	protected bool m_bAllowCommentedValues;
 
 	protected string m_sSetKey;
 	protected string m_sSetValue;
@@ -112,7 +113,21 @@ class ARIA_ConfigVisitor
 	//! preset stays in charge until the admin uncomments a line to override it.
 	void SetCommentValues(bool comment)
 	{
-		m_bCommentValues = comment;
+		m_bCommentValues = comment && m_bAllowCommentedValues;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Only the first-start defaults file comments values out. "#aria save" writes every
+	//! value active so runtime changes survive a restart.
+	void AllowCommentedValues(bool allow)
+	{
+		m_bAllowCommentedValues = allow;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool AllowsCommentedValues()
+	{
+		return m_bAllowCommentedValues;
 	}
 
 	//------------------------------------------------------------------------------------------------

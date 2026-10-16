@@ -345,9 +345,13 @@ class ARIA_Settings
 		m_sExcludedFactions = v.Str("excludedFactions", m_sExcludedFactions, "Comma separated faction keys ARIA must not touch, e.g. CIV,FIA");
 		m_iMaxGroupsPerFrame = v.Int("maxGroupsPerFrame", m_iMaxGroupsPerFrame, 1, 100, "Performance: squads evaluated per frame");
 
-		v.Comment("");
-		v.Comment("Everything below is commented out so the preset decides the value.");
-		v.Comment("Remove the leading '#' of a line to override that single value.");
+		if (v.AllowsCommentedValues())
+		{
+			v.Comment("");
+			v.Comment("Everything below is commented out so the preset decides the value.");
+			v.Comment("Remove the leading '#' of a line to override that single value.");
+		}
+
 		v.SetCommentValues(true);
 
 		m_Squad.Visit(v);

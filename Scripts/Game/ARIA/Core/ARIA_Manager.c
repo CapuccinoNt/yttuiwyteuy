@@ -21,6 +21,11 @@ class ARIA_Manager
 	protected ref array<ref ARIA_VehicleBrain> m_aVehicles = {};
 	protected ref array<ref ARIA_HeliPilot> m_aHelis = {};
 
+	// Helicopters ARIA let go of recently (crashed, player took over...): not re-adopted at once
+	protected ref array<IEntity> m_aReleasedHelis = {};
+	protected ref array<float> m_aReleasedTimes = {};
+	protected static const float READOPT_COOLDOWN = 60.0;
+
 	protected float m_fTime;
 	protected float m_fDiscoveryTimer;
 	protected int m_iGroupCursor;
@@ -217,13 +222,18 @@ class ARIA_Manager
 	//------------------------------------------------------------------------------------------------
 	protected void UpdateHelis(float dt)
 	{
-		if (!m_Settings.m_Heli.m_bEnabled)
-			return;
-
+		// Pilots keep flying even when helicopters get disabled at runtime: they land first,
+		// then hand the airframe back (dropping them mid-air would crash every helicopter).
+		bool enabled = m_Settings.m_Heli.m_bEnabled;
 		foreach (ARIA_HeliPilot pilot : m_aHelis)
 		{
-			if (pilot.IsValid())
-				pilot.Update(m_fTime, dt);
+			if (!pilot.IsValid())
+				continue;
+
+			if (!enabled)
+				pilot.RequestStandDown();
+
+			pilot.Update(m_fTime, dt);
 		}
 	}
 
@@ -272,7 +282,7 @@ class ARIA_Manager
 
 			if (ARIA_VehicleUtils.IsHelicopter(vehicle))
 			{
-				if (m_Settings.m_Heli.m_bEnabled && !FindHeliPilot(vehicle) && ARIA_VehicleUtils.IsPilotOf(character, vehicle))
+				if (m_Settings.m_Heli.m_bEnabled && !FindHeliPilot(vehicle) && !WasRecentlyReleased(vehicle) && ARIA_VehicleUtils.IsPilotOf(character, vehicle))
 				{
 					ARIA_HeliPilot pilot = new ARIA_HeliPilot(this, vehicle, brain);
 					if (pilot.IsValid())
@@ -316,8 +326,24 @@ class ARIA_Manager
 		{
 			if (!m_aHelis[i].IsValid())
 			{
+				IEntity helicopter = m_aHelis[i].GetHelicopter();
+				if (helicopter)
+				{
+					m_aReleasedHelis.Insert(helicopter);
+					m_aReleasedTimes.Insert(m_fTime);
+				}
+
 				m_aHelis[i].Release();
 				m_aHelis.Remove(i);
+			}
+		}
+
+		for (int i = m_aReleasedHelis.Count() - 1; i >= 0; i--)
+		{
+			if (!m_aReleasedHelis[i] || m_fTime - m_aReleasedTimes[i] > READOPT_COOLDOWN)
+			{
+				m_aReleasedHelis.Remove(i);
+				m_aReleasedTimes.Remove(i);
 			}
 		}
 
@@ -336,6 +362,12 @@ class ARIA_Manager
 			brain.Release();
 			m_aGroups.Remove(i);
 		}
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected bool WasRecentlyReleased(IEntity helicopter)
+	{
+		return m_aReleasedHelis.Contains(helicopter);
 	}
 
 	//------------------------------------------------------------------------------------------------
