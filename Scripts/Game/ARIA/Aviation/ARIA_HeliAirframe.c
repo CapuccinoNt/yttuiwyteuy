@@ -143,6 +143,12 @@ class ARIA_HeliAirframe
 
 		SetNativeRotorSuppressed(false);
 		m_Controller.SetPersistentWheelBrake(false);
+
+		// Restoring 1.0 would erase rotor damage: let the vanilla damage manager re-apply
+		// the real per-rotor efficiency.
+		SCR_VehicleDamageManagerComponent damage = SCR_VehicleDamageManagerComponent.Cast(m_Helicopter.FindComponent(SCR_VehicleDamageManagerComponent));
+		if (damage)
+			damage.UpdateVehicleState();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -190,6 +196,13 @@ class ARIA_HeliAirframe
 	void MarkSpooledUp()
 	{
 		m_bSpooledUp = true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Engine went off (ours or someone else's doing): the rotor must spool up again.
+	void ClearSpooledUp()
+	{
+		m_bSpooledUp = false;
 	}
 
 	//------------------------------------------------------------------------------------------------

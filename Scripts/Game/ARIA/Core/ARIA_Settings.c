@@ -351,6 +351,12 @@ class ARIA_Settings
 			v.Comment("Everything below is commented out so the preset decides the value.");
 			v.Comment("Remove the leading '#' of a line to override that single value.");
 		}
+		else
+		{
+			v.Comment("");
+			v.Comment("Saved by '#aria save': every value below is explicit, so general.preset no longer changes them.");
+			v.Comment("Delete this file and restart to get a fresh preset-driven defaults file.");
+		}
 
 		v.SetCommentValues(true);
 

@@ -171,6 +171,13 @@ class ARIA_GroupBrain
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Helicopter currently airlifting this squad (null when not in an airlift).
+	ARIA_HeliPilot GetAirliftHeli()
+	{
+		return m_AirliftHeli;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	void OnSettingsChanged()
 	{
 		// Re-apply skill to everyone on the next think
@@ -986,7 +993,7 @@ class ARIA_GroupBrain
 			return;
 
 		m_bHoldActive = false;
-		if (m_Utility && m_fDefaultAutonomousDistance > 0)
+		if (m_Utility && m_fDefaultAutonomousDistance >= 0)
 			m_Utility.SetMaxAutonomousDistance(m_fDefaultAutonomousDistance);
 	}
 
@@ -1047,7 +1054,11 @@ class ARIA_GroupBrain
 		foreach (AIAgent agent : agents)
 		{
 			IEntity vehicle = ARIA_EntityUtils.GetVehicle(agent.GetControlledEntity());
-			if (vehicle && m_Manager.FindHeliPilot(vehicle))
+			if (!vehicle)
+				continue;
+
+			ARIA_HeliPilot pilot = m_Manager.FindHeliPilot(vehicle);
+			if (pilot && pilot.IsAirborne())
 				return true;
 		}
 

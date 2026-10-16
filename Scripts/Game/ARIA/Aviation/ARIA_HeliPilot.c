@@ -71,6 +71,8 @@ class ARIA_HeliPilot
 	protected float m_fOrbitDirection = 1;
 	protected bool m_bIdleLoiter;
 	protected bool m_bStandDown;
+	protected bool m_bInitialized;		//!< first Decide() done: crew waypoints absorbed
+	protected bool m_bHasTakeoffPos;	//!< m_vTakeoffPos is a spot we know we can land on
 
 	// Landing retries
 	protected int m_iLandingFailures;
@@ -173,7 +175,7 @@ class ARIA_HeliPilot
 	//! Free for support missions: no orders of its own, not damaged.
 	bool IsAvailableForTasking()
 	{
-		if (!IsValid() || m_bDamagedRTB)
+		if (!IsValid() || m_bDamagedRTB || m_bStandDown || !m_bInitialized)
 			return false;
 
 		if (m_eState == ARIA_EHeliState.TAKEOFF || m_eState == ARIA_EHeliState.LANDING)
@@ -190,6 +192,13 @@ class ARIA_HeliPilot
 		}
 
 		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! ARIA is flying the airframe right now (not parked, starting or landed).
+	bool IsAirborne()
+	{
+		return m_eState == ARIA_EHeliState.TAKEOFF || m_eState == ARIA_EHeliState.FLYING || m_eState == ARIA_EHeliState.LANDING;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -270,6 +279,7 @@ class ARIA_HeliPilot
 		CancelAirOpsSquads();
 		ClearTasks();
 		m_bIdleLoiter = false;
+		QueueUnloadIfCarrying(m_Helicopter.GetOrigin());
 		if (m_bHasHome)
 			QueueReturnToBase();
 		else
@@ -312,15 +322,18 @@ class ARIA_HeliPilot
 		if (m_bStandDown || !IsValid())
 			return;
 
-		m_bStandDown = true;
 		CancelAirOpsSquads();
 		ClearTasks();
+		m_bStandDown = true;
 		m_bIdleLoiter = false;
 
-		bool airborne = m_eState == ARIA_EHeliState.TAKEOFF || m_eState == ARIA_EHeliState.FLYING || m_eState == ARIA_EHeliState.LANDING;
-		if (airborne)
-			m_aTasks.Insert(ARIA_HeliTask.Create(ARIA_EHeliTaskType.LAND, m_Helicopter.GetOrigin()));
-
+		// Land near where we are, put any passengers on the ground, then hand the airframe back.
+		// (Known-good spots are only used if landing here fails, see AbandonLanding.)
+		vector here = m_Helicopter.GetOrigin();
+		if (HasPassengers())
+			QueueUnloadIfCarrying(here);
+		else if (IsAirborne())
+			m_aTasks.Insert(ARIA_HeliTask.Create(ARIA_EHeliTaskType.LAND, here));
 		ARIA_Log.Info(GetDebugName() + " standing down");
 	}
 
@@ -345,11 +358,16 @@ class ARIA_HeliPilot
 	//------------------------------------------------------------------------------------------------
 	protected void Decide(float now)
 	{
+		if (!m_Airframe.IsEngineOn())
+			m_Airframe.ClearSpooledUp();
+
 		if (!CheckPilotAndAirframe(now))
 			return;
 
 		if (!m_bStandDown)
 			AbsorbCrewWaypoints();
+
+		m_bInitialized = true;
 
 		CheckThreat(now);
 
@@ -383,6 +401,13 @@ class ARIA_HeliPilot
 
 			case ARIA_EHeliState.STARTING:
 			{
+				if (m_bStandDown)
+				{
+					m_Airframe.StopEngine();
+					Disable(now);
+					return;
+				}
+
 				// Take off once the rotor is at speed (spool-up is marked above), or after the
 				// timeout on airframes whose RPM data is unusual
 				float spoolUp = m_Manager.GetSettings().m_Heli.m_fSpoolUpTime;
@@ -450,7 +475,8 @@ class ARIA_HeliPilot
 			case ARIA_EHeliTaskType.RTB:
 			{
 				UpdateLZSearch(task);
-				if (!m_bLZReady)
+				// The search may have abandoned this landing and changed the queue
+				if (!m_bLZReady || m_aTasks.IsEmpty() || m_aTasks[0] != task)
 					break;
 
 				float lzDistance = ARIA_Math.HorizontalDistance(m_Helicopter.GetOrigin(), m_vLZ);
@@ -504,8 +530,10 @@ class ARIA_HeliPilot
 				SetState(ARIA_EHeliState.LANDED, now);
 
 				ARIA_HeliTask task = GetCurrentTask(now);
-				if (task && (task.m_eType == ARIA_EHeliTaskType.LAND))
+				if (task && task.m_eType == ARIA_EHeliTaskType.LAND)
 					CompleteTask(now);
+				else if (task && task.m_eType == ARIA_EHeliTaskType.RTB)
+					task.m_bStarted = true; // landed on the LZ chosen for home, even if it is far from it
 			}
 		}
 		else
@@ -535,7 +563,29 @@ class ARIA_HeliPilot
 	protected void AbandonLanding(float now)
 	{
 		ARIA_Log.Warning(GetDebugName() + " could not find a place to land, skipping the landing");
+
+		if (m_bStandDown)
+		{
+			// Standing down: retry at a spot we know is landable; release as a last resort
+			if (m_iLandingFailures >= MAX_LANDING_ATTEMPTS * 2)
+			{
+				ARIA_Log.Warning(GetDebugName() + " cannot land to stand down, releasing control");
+				Disable(now);
+				return;
+			}
+
+			m_aTasks.Clear();
+			ResetLZ();
+			vector spot = GetStandDownSpot();
+			if (HasPassengers())
+				QueueUnloadIfCarrying(spot);
+			else
+				m_aTasks.Insert(ARIA_HeliTask.Create(ARIA_EHeliTaskType.LAND, spot));
+			return;
+		}
+
 		bool removedLanding;
+		bool removedPickup;
 		while (!m_aTasks.IsEmpty())
 		{
 			ARIA_HeliTask task = m_aTasks[0];
@@ -547,21 +597,83 @@ class ARIA_HeliPilot
 			if (!landing && !groundTask)
 				break;
 
-			if (task.m_Squad && task.m_Squad.IsValid() && task.m_eType == ARIA_EHeliTaskType.UNLOAD)
-				task.m_Squad.OnAirliftFinished(now);
+			if (task.m_eType == ARIA_EHeliTaskType.BOARD && task.m_bFromAirOps)
+				removedPickup = true;
 
 			removedLanding = removedLanding || landing;
 			m_aTasks.RemoveOrdered(0);
 		}
 
 		ResetLandingRetries();
+
+		// Could not reach the waiting squad: cancel the airlift, the squad walks
+		if (removedPickup)
+		{
+			AbortAirOpsMission(now);
+			return;
+		}
+
+		// Troops still aboard (drop zone unusable): put them down where we last took off
+		vector fallback = m_Helicopter.GetOrigin();
+		if (m_bHasTakeoffPos)
+			fallback = m_vTakeoffPos;
+
+		if (HasPassengers())
+		{
+			ARIA_HeliTask unload = ARIA_HeliTask.Create(ARIA_EHeliTaskType.UNLOAD, fallback);
+			unload.m_fDuration = m_Manager.GetSettings().m_Heli.m_fUnloadTimeout;
+			m_aTasks.InsertAt(unload, 0);
+			m_aTasks.InsertAt(ARIA_HeliTask.Create(ARIA_EHeliTaskType.LAND, fallback), 0);
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
 	protected void ResetLandingRetries()
 	{
+		// While standing down the counters escalate towards releasing control
+		if (m_bStandDown)
+			return;
+
 		m_iLandingFailures = 0;
 		m_aLZBlacklist.Clear();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Known-good landing spot for standing down: last takeoff point, home, or right here.
+	protected vector GetStandDownSpot()
+	{
+		if (m_bHasTakeoffPos)
+			return m_vTakeoffPos;
+
+		if (m_bHasHome)
+			return m_vHome;
+
+		return m_Helicopter.GetOrigin();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Adds LAND + UNLOAD at `where` (front of the queue) when AI passengers are aboard.
+	protected void QueueUnloadIfCarrying(vector where)
+	{
+		if (!HasPassengers())
+			return;
+
+		ARIA_HeliTask unload = ARIA_HeliTask.Create(ARIA_EHeliTaskType.UNLOAD, where);
+		unload.m_fDuration = m_Manager.GetSettings().m_Heli.m_fUnloadTimeout;
+		m_aTasks.InsertAt(unload, 0);
+		if (IsAirborne())
+			m_aTasks.InsertAt(ARIA_HeliTask.Create(ARIA_EHeliTaskType.LAND, where), 0);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Squads airlifted by this helicopter that are on the ground again resume their orders.
+	protected void ReleaseDisembarkedAirliftSquads(float now)
+	{
+		foreach (ARIA_GroupBrain brain : m_Manager.GetGroupBrains())
+		{
+			if (brain.IsValid() && brain.GetAirliftHeli() == this && brain.IsOutOf(m_Helicopter))
+				brain.OnAirliftFinished(now);
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -632,6 +744,7 @@ class ARIA_HeliPilot
 					if (task.m_Squad && task.m_Squad.IsValid())
 						task.m_Squad.OnAirliftFinished(now);
 
+					ReleaseDisembarkedAirliftSquads(now);
 					CompleteTask(now);
 				}
 				return;
@@ -639,7 +752,7 @@ class ARIA_HeliPilot
 
 			case ARIA_EHeliTaskType.RTB:
 			{
-				if (!IsNear(task.m_vPosition))
+				if (!task.m_bStarted && !IsNear(task.m_vPosition))
 					break; // home is elsewhere: take off
 
 				// Landed at home: mission complete
@@ -677,6 +790,7 @@ class ARIA_HeliPilot
 	{
 		m_Airframe.ReleaseGround();
 		m_vTakeoffPos = m_Helicopter.GetOrigin();
+		m_bHasTakeoffPos = true;
 		m_Controller.Reset();
 		ResetLZ();
 		SetState(ARIA_EHeliState.TAKEOFF, now);
@@ -693,6 +807,7 @@ class ARIA_HeliPilot
 		if (!airborneState)
 			return;
 
+		m_Airframe.SetNativeRotorSuppressed(true);
 		m_Airframe.ReadState(m_FlightState);
 		BuildCommand(now);
 		m_Controller.Update(m_FlightState, m_Command, dt, m_Output);
@@ -944,6 +1059,7 @@ class ARIA_HeliPilot
 		ARIA_HeliTask task = m_aTasks[0];
 		m_aTasks.RemoveOrdered(0);
 		ResetLZ();
+		ResetLandingRetries();
 
 		if (task.m_bRepeat)
 		{
@@ -965,6 +1081,7 @@ class ARIA_HeliPilot
 	{
 		m_aTasks.Clear();
 		ResetLZ();
+		ResetLandingRetries();
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -1040,7 +1157,21 @@ class ARIA_HeliPilot
 			m_vLZ = m_LZSearch.GetResult();
 			m_bLZReady = true;
 			if (!m_LZSearch.IsFound())
+			{
+				// The best-effort spot already failed once: do not waste another minute on it
+				foreach (vector spot : m_aLZBlacklist)
+				{
+					if (ARIA_Math.HorizontalDistance(spot, m_vLZ) < 25)
+					{
+						ResetLZ();
+						m_iLandingFailures = Math.Max(m_iLandingFailures, MAX_LANDING_ATTEMPTS);
+						AbandonLanding(m_Manager.GetTime());
+						return;
+					}
+				}
+
 				ARIA_Log.Warning(GetDebugName() + " found no clear LZ near " + task.m_vPosition.ToString() + ", landing at the best effort spot");
+			}
 		}
 	}
 
@@ -1128,13 +1259,16 @@ class ARIA_HeliPilot
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Ends the airlift of every squad assigned to this helicopter that is NOT aboard.
+	//! Squads still aboard are released when they get out (UNLOAD) or when this pilot goes away
+	//! (their ARIA_GroupBrain notices the helicopter is gone).
 	protected void CancelAirOpsSquads()
 	{
 		float now = m_Manager.GetTime();
-		foreach (ARIA_HeliTask task : m_aTasks)
+		foreach (ARIA_GroupBrain brain : m_Manager.GetGroupBrains())
 		{
-			if (task.m_bFromAirOps && task.m_Squad && task.m_Squad.IsValid() && task.m_eType == ARIA_EHeliTaskType.UNLOAD)
-				task.m_Squad.OnAirliftFinished(now);
+			if (brain.IsValid() && brain.GetAirliftHeli() == this && brain.IsOutOf(m_Helicopter))
+				brain.OnAirliftFinished(now);
 		}
 	}
 
@@ -1143,8 +1277,10 @@ class ARIA_HeliPilot
 	{
 		CancelAirOpsSquads();
 		ClearTasks();
+		QueueUnloadIfCarrying(m_Helicopter.GetOrigin());
 		QueueReturnToBase();
-		BeginTakeoff(now);
+		if (m_eState == ARIA_EHeliState.LANDED)
+			BeginTakeoff(now);
 	}
 
 	//==============================================================================================
@@ -1226,19 +1362,10 @@ class ARIA_HeliPilot
 			m_bDamagedRTB = true;
 			ARIA_Log.Info(GetDebugName() + " badly damaged, returning to base");
 
-			bool passengers = HasPassengers();
+			// Drop any passengers at the nearest safe spot first, then fly home
 			CancelAirOpsSquads();
 			ClearTasks();
-			if (passengers)
-			{
-				// Drop the passengers at the nearest safe spot first
-				ARIA_HeliTask land = ARIA_HeliTask.Create(ARIA_EHeliTaskType.LAND, m_Helicopter.GetOrigin());
-				m_aTasks.Insert(land);
-				ARIA_HeliTask unload = ARIA_HeliTask.Create(ARIA_EHeliTaskType.UNLOAD, m_Helicopter.GetOrigin());
-				unload.m_fDuration = cfg.m_fUnloadTimeout;
-				m_aTasks.Insert(unload);
-			}
-
+			QueueUnloadIfCarrying(m_Helicopter.GetOrigin());
 			QueueReturnToBase();
 		}
 	}

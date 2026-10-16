@@ -44,6 +44,7 @@ def visit(cls, prefix_override=None, lines=None, comment_values=False):
     fields, body = defaults[cls]
     m = re.search(r'void Visit\(ARIA_ConfigVisitor v\)\s*\{(.*?)\n\t\}', body, re.S)
     prefix = ''
+    skip_else = False
     for raw in m.group(1).split('\n'):
         line = raw.strip()
         bs = re.match(r'v\.BeginSection\("([^"]*)"(?:\s*\+\s*m_sFactionKey)?,\s*(.*)\);', line)
@@ -53,6 +54,14 @@ def visit(cls, prefix_override=None, lines=None, comment_values=False):
             title = re.sub(r'"\s*\+\s*VERSION\s*\+\s*"', '1', title)
             title = title.replace('" + m_sFactionKey', ' default"').strip('"')
             lines += ['', '#' + '-' * 78, '# ' + title, '#' + '-' * 78]
+            continue
+        if line == 'else':
+            skip_else = True
+            continue
+        if skip_else:
+            # the else-branch of AllowsCommentedValues() only appears in '#aria save' files
+            if line == '}':
+                skip_else = False
             continue
         cm = re.match(r'v\.Comment\("(.*)"\);', line)
         if cm:
