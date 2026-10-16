@@ -18,6 +18,7 @@ vehículos con cabeza y que vuele.
 | API usada | Verificada contra los scripts oficiales de Bohemia **1.8.0.13** ([Arma-Reforger-Script-Diff](https://github.com/BohemiaInteractive/Arma-Reforger-Script-Diff)) |
 | Verificador estático (`tools/aria_lint.py`) | **0 errores**. Revisa clases, métodos, campos, enums, número de argumentos, overrides y acceso `protected` contra ~9000 clases vanilla |
 | Simulador de vuelo (`tools/flight_sim.py`) | **PASA**: despegue, crucero de 3 km, vuelo estacionario, órbita y aterrizaje, con viento y framerate variable |
+| Revisión independiente | 8 errores de ejecución encontrados y **corregidos** (grupos borrados durante un aerotransporte, reintentos de aterrizaje, sustentación nativa del rotor, etc.) |
 | **Compilado en Workbench** | **Todavía no.** Este código se escribió sin acceso al juego ni a Workbench |
 | **Probado en partida** | **Todavía no** |
 
@@ -66,6 +67,7 @@ de mods) cuyo asiento de piloto ocupe un soldado de IA de un grupo dirigido por 
   - Si recibe impactos, maniobra evasiva a baja cota.
   - Si queda muy dañado, desembarca a los pasajeros y vuelve a la base (RTB).
   - Si el piloto muere, el **copiloto toma los mandos**.
+  - Si no encuentra dónde aterrizar, marca el punto como malo, busca en un radio mayor y, tras 3 intentos, desiste de ese aterrizaje.
   - Si ya no puede volar, ARIA lo suelta y cae según la física real del juego.
 - **Nunca toca helicópteros pilotados por jugadores.**
 
@@ -182,7 +184,7 @@ vehicle.dismountDistance = 500
 | `#aria status` | Escuadras gestionadas y en combate, y helicópteros en vuelo |
 | `#aria reload` | Relee el archivo de configuración |
 | `#aria set <clave> <valor>` | Cambia un ajuste en caliente, por ejemplo `#aria set heli.cruiseSpeedKmh 220` |
-| `#aria save` | Guarda la configuración actual en el archivo |
+| `#aria save` | Guarda la configuración actual en el archivo, con **todos** los valores activos. A partir de ahí el preset ya no los cambia |
 
 ### Ajustes principales
 | Sección | Ejemplos |
@@ -273,6 +275,7 @@ python3 tools/gen_example_cfg.py
 - No hay aviones de ala fija.
 - El desembarco se hace aterrizando. No hay *fast-rope*, porque Reforger no lo tiene.
 - Los waypoints asignados a un helicóptero desaparecen del mapa del Game Master.
+- Con `#aria set heli.enabled false` en caliente, los helicópteros en vuelo aterrizan donde pueden y luego devuelven el control al juego.
 - Futuro: menú de órdenes para el Game Master, uso de artillería y morteros, guarniciones en edificios y pasadas de ataque con cohetes.
 
 ## Licencia
