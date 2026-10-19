@@ -154,11 +154,10 @@ class ARIA_HeliAirframe
 	//------------------------------------------------------------------------------------------------
 	void StartEngine()
 	{
+		// Only the controller's start request: it honours fuel, drowning and engine damage.
+		// (Forcing the simulation would let a helicopter fly without a working engine.)
 		if (!m_Controller.IsEngineOn())
-		{
-			if (!m_Controller.StartEngine())
-				m_Simulation.EngineStart();
-		}
+			m_Controller.StartEngine();
 
 		m_Simulation.SetThrottle(1);
 		m_Controller.SetAutohoverEnabled(false);
@@ -216,11 +215,48 @@ class ARIA_HeliAirframe
 		if (damage && !damage.GetEngineFunctional())
 			return true;
 
+		if (!HasFuel() || m_Controller.GetEngineDrowned())
+			return true;
+
+		int rotors = m_Simulation.RotorCount();
+		for (int i = 0; i < rotors; i++)
+		{
+			if (m_Simulation.RotorGetState(i) == RotorState.DESTROYED)
+				return true;
+		}
+
 		// Rotor wound down while the engine runs = rotor destroyed
 		if (m_bSpooledUp && m_Controller.IsEngineOn() && GetRotorSpoolRatio() < 0.5)
 			return true;
 
 		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool HasFuel()
+	{
+		FuelManagerComponent fuel = m_Controller.GetFuelManager();
+		return !fuel || fuel.GetTotalFuel() > 0;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Caps the sink rate right away (used when ARIA adopts a helicopter that is falling).
+	void LimitSinkRate(float maxDescent)
+	{
+		vector velocity = m_Physics.GetVelocity();
+		if (velocity[1] < -maxDescent)
+		{
+			velocity[1] = -maxDescent;
+			m_Physics.SetVelocity(velocity);
+		}
+
+		m_Physics.SetAngularVelocity(m_Physics.GetAngularVelocity() * 0.3);
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool HasGroundContact()
+	{
+		return m_Simulation.HasAnyGroundContact();
 	}
 
 	//------------------------------------------------------------------------------------------------

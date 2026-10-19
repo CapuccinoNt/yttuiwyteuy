@@ -170,7 +170,7 @@ class Controller:
     def __init__(self, c):
         self.c = c
         self.vpid = VPID(c.vel_gain, c.vel_int, 0, 6, c.max_accel * 2)
-        self.vpid.set_vertical(c.vel_gain * 1.4, c.vel_int * 2.0, 0, 12, G)
+        self.vpid.set_vertical(c.vel_gain * 1.4, c.vel_int * 2.0, 0, 12, G * 2)
         self.held_yaw = None
 
     def reset(self):

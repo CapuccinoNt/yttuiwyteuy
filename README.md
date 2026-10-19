@@ -18,7 +18,7 @@ vehículos con cabeza y que vuele.
 | API usada | Verificada contra los scripts oficiales de Bohemia **1.8.0.13** ([Arma-Reforger-Script-Diff](https://github.com/BohemiaInteractive/Arma-Reforger-Script-Diff)) |
 | Verificador estático (`tools/aria_lint.py`) | **0 errores**. Revisa clases, métodos, campos, enums, número de argumentos, overrides y acceso `protected` contra ~9000 clases vanilla |
 | Simulador de vuelo (`tools/flight_sim.py`) | **PASA**: despegue, crucero de 3 km, vuelo estacionario, órbita y aterrizaje, con viento y framerate variable |
-| Revisión independiente | 8 errores de ejecución encontrados y **corregidos** (grupos borrados durante un aerotransporte, reintentos de aterrizaje, sustentación nativa del rotor, etc.) |
+| Revisiones independientes | 3 rondas (63 agentes en la última, cada hallazgo verificado por 2 escépticos): unos 40 errores de ejecución encontrados y **corregidos**, entre ellos contactos fantasma entre escuadras, retiradas en cadena, helicópteros sin motor que seguían volando y aerotransportes que no terminaban |
 | **Compilado en Workbench** | **Todavía no.** Este código se escribió sin acceso al juego ni a Workbench |
 | **Probado en partida** | **Todavía no** |
 
@@ -43,6 +43,7 @@ arreglos quedan localizados.
 - **Apoyo aéreo cercano** automático cuando aparecen blindados, aeronaves o fuerzas grandes.
 - **Armas estáticas**: en combate, la escuadra pone un artillero en ametralladoras o lanzadores fijos libres que tenga cerca.
 - **Respeta las órdenes**: los waypoints forzados del Game Master o de la misión (prioridad > 0) nunca se sobrescriben.
+- **No toca la IA de los jugadores**: con `squad.affectPlayerLedGroups = false`, los grupos con jugadores y la IA reclutada por ellos se devuelven a la IA vanilla.
 
 ### Vehículos terrestres (coches, camiones, APC, IFV, tanques)
 - **Uso de vehículos**: para movimientos largos, la escuadra toma un vehículo amigo o neutral libre que tenga cerca y la IA vanilla lo conduce.
@@ -68,7 +69,7 @@ de mods) cuyo asiento de piloto ocupe un soldado de IA de un grupo dirigido por 
   - Si queda muy dañado, desembarca a los pasajeros y vuelve a la base (RTB).
   - Si el piloto muere, el **copiloto toma los mandos**.
   - Si no encuentra dónde aterrizar, marca el punto como malo, busca en un radio mayor y, tras 3 intentos, desiste de ese aterrizaje.
-  - Si ya no puede volar, ARIA lo suelta y cae según la física real del juego.
+  - Sin combustible, con el motor ahogado o destruido, o con un rotor destruido, ARIA no lo sostiene en el aire: lo suelta y cae según la física real del juego.
 - **Nunca toca helicópteros pilotados por jugadores.**
 
 ### Totalmente personalizable
@@ -182,8 +183,8 @@ vehicle.dismountDistance = 500
 | Comando | Efecto |
 |---|---|
 | `#aria status` | Escuadras gestionadas y en combate, y helicópteros en vuelo |
-| `#aria reload` | Relee el archivo de configuración |
-| `#aria set <clave> <valor>` | Cambia un ajuste en caliente, por ejemplo `#aria set heli.cruiseSpeedKmh 220` |
+| `#aria reload` | Relee el archivo de configuración. Si ARIA estaba apagado (`general.enabled = false`) y lo activaste en el archivo, lo arranca. Si el archivo no se puede leer, mantiene la configuración actual |
+| `#aria set <clave> <valor>` | Cambia un ajuste en caliente, por ejemplo `#aria set heli.cruiseSpeedKmh 220` o `#aria set skill.USSR.skill 0.8`. Si el valor no es válido, se rechaza. Para cambiar el preset hay que editar el archivo y usar `#aria reload`. Apagar `squad.enabled`, `vehicle.enabled` o `heli.enabled` en caliente devuelve la IA al juego vanilla de forma limpia; los helicópteros aterrizan antes |
 | `#aria save` | Guarda la configuración actual en el archivo, con **todos** los valores activos. A partir de ahí el preset ya no los cambia |
 
 ### Ajustes principales

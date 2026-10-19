@@ -178,11 +178,31 @@ class ARIA_ConfigVisitor
 				return false;
 
 			raw = m_sSetValue;
-			m_bSetApplied = true;
 			return true;
 		}
 
 		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A value was parsed successfully for fullKey.
+	protected void Accept()
+	{
+		if (m_eMode == ARIA_EConfigMode.SET_ONE)
+			m_bSetApplied = true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Invalid text: keep the current value and say so.
+	protected void Reject(string fullKey, string raw)
+	{
+		ARIA_Log.Warning("Invalid value '" + raw + "' for " + fullKey + ", keeping the current value");
+	}
+
+	//------------------------------------------------------------------------------------------------
+	string GetSetKey()
+	{
+		return m_sSetKey;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -212,7 +232,16 @@ class ARIA_ConfigVisitor
 		if (!FetchRaw(fullKey, raw))
 			return current;
 
-		return Math.Clamp(raw.ToFloat(), min, max);
+		int parsed;
+		float value = raw.ToFloat(current, 0, parsed);
+		if (parsed <= 0)
+		{
+			Reject(fullKey, raw);
+			return current;
+		}
+
+		Accept();
+		return Math.Clamp(value, min, max);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -229,7 +258,16 @@ class ARIA_ConfigVisitor
 		if (!FetchRaw(fullKey, raw))
 			return current;
 
-		return Math.ClampInt(raw.ToInt(), min, max);
+		int parsed;
+		int value = raw.ToInt(current, 0, parsed);
+		if (parsed <= 0)
+		{
+			Reject(fullKey, raw);
+			return current;
+		}
+
+		Accept();
+		return Math.ClampInt(value, min, max);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -250,8 +288,22 @@ class ARIA_ConfigVisitor
 		if (!FetchRaw(fullKey, raw))
 			return current;
 
-		raw.ToLower();
-		return raw == "true" || raw == "1" || raw == "yes" || raw == "on";
+		string text = raw;
+		text.ToLower();
+		if (text == "true" || text == "1" || text == "yes" || text == "on")
+		{
+			Accept();
+			return true;
+		}
+
+		if (text == "false" || text == "0" || text == "no" || text == "off")
+		{
+			Accept();
+			return false;
+		}
+
+		Reject(fullKey, raw);
+		return current;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -268,6 +320,7 @@ class ARIA_ConfigVisitor
 		if (!FetchRaw(fullKey, raw))
 			return current;
 
+		Accept();
 		return raw;
 	}
 

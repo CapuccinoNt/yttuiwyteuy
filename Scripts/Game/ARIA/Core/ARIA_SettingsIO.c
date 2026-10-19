@@ -11,7 +11,21 @@ class ARIA_SettingsIO
 	static const string FILE_PATH = "$profile:ARIA/ARIA_Settings.cfg";
 
 	//------------------------------------------------------------------------------------------------
+	//! Loads the settings; falls back to defaults if the file cannot be read.
 	static ARIA_Settings Load()
+	{
+		ARIA_Settings settings = TryLoad();
+		if (settings)
+			return settings;
+
+		settings = new ARIA_Settings();
+		settings.ApplyPreset(settings.m_sPreset);
+		return settings;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Returns null when the file exists but cannot be opened (keeps live settings on reload).
+	static ARIA_Settings TryLoad()
 	{
 		ARIA_Settings settings = new ARIA_Settings();
 
@@ -27,9 +41,8 @@ class ARIA_SettingsIO
 		FileHandle file = FileIO.OpenFile(FILE_PATH, FileMode.READ);
 		if (!file)
 		{
-			ARIA_Log.Warning("Could not open " + FILE_PATH + ", using defaults");
-			settings.ApplyPreset(settings.m_sPreset);
-			return settings;
+			ARIA_Log.Warning("Could not open " + FILE_PATH);
+			return null;
 		}
 
 		string line;
@@ -83,6 +96,29 @@ class ARIA_SettingsIO
 
 		file.Close();
 		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Current value of one setting as written in the file (for admin replies).
+	static string GetValueText(ARIA_Settings settings, string key)
+	{
+		ARIA_ConfigVisitor visitor = new ARIA_ConfigVisitor(ARIA_EConfigMode.SAVE);
+		settings.Visit(visitor);
+		string prefix = key + " = ";
+		foreach (string line : visitor.GetLines())
+		{
+			if (!line.StartsWith(prefix))
+				continue;
+
+			string rest = line.Substring(prefix.Length(), line.Length() - prefix.Length());
+			int hash = rest.IndexOf("#");
+			if (hash >= 0)
+				rest = rest.Substring(0, hash);
+
+			return rest.Trim();
+		}
+
+		return "?";
 	}
 
 	//------------------------------------------------------------------------------------------------

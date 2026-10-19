@@ -137,7 +137,7 @@ class ARIA_Api
 		manager.FindFriendlyGroups(faction, position, manager.GetSettings().m_Squad.m_fIntelShareRadius, null, receivers);
 		foreach (ARIA_GroupBrain receiver : receivers)
 		{
-			receiver.ReceiveIntel(enemy, position, ARIA_EntityUtils.GetContactType(enemy), manager.GetTime());
+			receiver.ReceiveIntel(enemy, position, ARIA_EntityUtils.GetContactType(enemy), manager.GetTime(), manager.GetTime());
 		}
 	}
 }

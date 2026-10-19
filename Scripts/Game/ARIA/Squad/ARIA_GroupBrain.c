@@ -62,6 +62,17 @@ class ARIA_GroupBrain
 	protected IEntity m_BorrowedVehicle;
 	protected IEntity m_StaticWeapon;
 	protected float m_fLastStaticCheck = -1000;
+
+	// Withdraw / reinforcement bookkeeping
+	protected float m_fLastWithdrawTime = -1000;
+	protected int m_iStrengthAtWithdraw;
+	protected ARIA_GroupBrain m_LastHelped;			//!< requester we reinforced most recently
+	protected float m_fHelpArrivalTime = -1000;
+	protected float m_fOrderTimeout = 150;
+
+	//! Boarding restrictions are read by vanilla through a weak reference: keep them alive here.
+	protected static ref SCR_AIBoardingParameters s_CargoOnlyBoarding;
+	protected static ref SCR_AIBoardingParameters s_GunnerOnlyBoarding;
 	protected ref array<IEntity> m_aSkilledMembers = {};
 	protected ref array<AIWaypoint> m_aStashedWaypoints = {};
 	protected ref array<vector> m_aStashedPositions = {};
@@ -71,6 +82,9 @@ class ARIA_GroupBrain
 	protected static const float FLANK_RETRY_INTERVAL = 60.0;
 	protected static const float BROADCAST_INTERVAL = 8.0;
 	protected static const float ORDER_TIMEOUT = 150.0;
+	protected static const float FRESH_CONTACT_AGE = 10.0;
+	protected static const float DANGER_RADIUS = 300.0;
+	protected static const float HELP_ARRIVAL_MEMORY = 120.0;
 	protected static const float HOLD_DURATION = 40.0;
 	protected static const float STATIC_WEAPON_INTERVAL = 30.0;
 	protected static const ResourceName MOVE_WAYPOINT = "{750A8D1695BD6998}Prefabs/AI/Waypoints/AIWaypoint_Move.et";
@@ -199,6 +213,35 @@ class ARIA_GroupBrain
 			RestoreWaypoints();
 	}
 
+	//------------------------------------------------------------------------------------------------
+	//! Crewing an ARIA helicopter or riding one in an airlift: must not be released mid-flight.
+	bool IsBusyInAir()
+	{
+		if (m_Helicopter && m_Helicopter.IsValid())
+			return true;
+
+		return m_eState == ARIA_ESquadState.AIRLIFT && m_AirliftHeli && m_AirliftHeli.IsValid();
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Squad AI switched off at runtime: undo everything ARIA changed and go idle.
+	void StandDown(float now)
+	{
+		if (IsBusyInAir())
+			return;
+
+		ClearOrder();
+		RestoreAutonomousDistance();
+		ReleaseStaticWeapon();
+		if (m_BorrowedVehicle)
+			ARIA_VehicleUtils.Unclaim(m_BorrowedVehicle);
+
+		m_BorrowedVehicle = null;
+		m_HelpTarget = null;
+		m_fFirstContactTime = -1;
+		SetState(ARIA_ESquadState.IDLE, now);
+	}
+
 	//==============================================================================================
 	// Main loop
 	//==============================================================================================
@@ -277,9 +320,13 @@ class ARIA_GroupBrain
 			if (perceptionManager)
 				age = Math.Max(0, perceptionTime - target.m_fTimestamp);
 
+			// Long-lost targets would come back as "new" contacts and bounce between squads
+			if (age > m_Manager.GetSettings().m_Squad.m_fContactMemory)
+				continue;
+
 			ARIA_EContactType type = ARIA_EntityUtils.GetContactType(target.m_Entity);
 			bool isNew = m_Memory.Report(target.m_Entity, target.m_vWorldPos, type, now - age, false);
-			if (isNew)
+			if (isNew && age <= FRESH_CONTACT_AGE)
 				newest = m_Memory.Find(target.m_Entity);
 		}
 
@@ -296,16 +343,20 @@ class ARIA_GroupBrain
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Radio report from another squad (ARIA_Comms).
-	void ReceiveIntel(IEntity enemy, vector position, ARIA_EContactType type, float now)
+	//! Radio report from another squad (ARIA_Comms). \param seenTime when the sender saw the enemy.
+	void ReceiveIntel(IEntity enemy, vector position, ARIA_EContactType type, float seenTime, float now)
 	{
-		m_Memory.Report(enemy, position, type, now, true);
+		// Keep the original sighting time: relayed intel must age, not be re-stamped as fresh
+		m_Memory.Report(enemy, position, type, seenTime, true);
 
 		// Feed the vanilla group perception so native AI reacts on its own
 		SCR_AIGroupPerception perception = m_Utility.m_Perception;
 		PerceptionManager perceptionManager = GetGame().GetPerceptionManager();
 		if (perception && perceptionManager && enemy)
-			perception.AddOrUpdateGunshot(enemy, position, ARIA_EntityUtils.GetFaction(enemy), perceptionManager.GetTime(), false);
+		{
+			float stamp = perceptionManager.GetTime() - Math.Max(0, now - seenTime);
+			perception.AddOrUpdateGunshot(enemy, position, ARIA_EntityUtils.GetFaction(enemy), stamp, false);
+		}
 	}
 
 	//==============================================================================================
@@ -368,9 +419,15 @@ class ARIA_GroupBrain
 				if (IsOrderFinished() || IsOrderTimedOut(now))
 				{
 					if (IsOrderSucceeded())
+					{
 						StartAssault(now);
+					}
 					else
+					{
+						// Fail the forced move so vanilla combat logic takes over again
+						ClearOrder();
 						SetState(ARIA_ESquadState.ENGAGING, now);
+					}
 				}
 				break;
 			}
@@ -405,10 +462,24 @@ class ARIA_GroupBrain
 
 			case ARIA_ESquadState.REINFORCING:
 			{
+				if (CheckWithdraw(now))
+				{
+					m_HelpTarget = null;
+					break;
+				}
+
+				// Enemy close on the way: stop the march and fight (vanilla combat takes over)
+				bool contactClose = m_Memory.HasFreshContactWithin(GetPosition(), Math.Min(DANGER_RADIUS, cfg.m_fEngageRange * 0.5), now, FRESH_CONTACT_AGE);
 				bool targetGone = !m_HelpTarget || !m_HelpTarget.IsValid();
-				if (IsOrderFinished() || IsOrderTimedOut(now) || targetGone)
+				if (contactClose || IsOrderFinished() || IsOrderTimedOut(now) || targetGone)
 				{
 					ClearOrder();
+					if (!targetGone)
+					{
+						m_LastHelped = m_HelpTarget;
+						m_fHelpArrivalTime = now;
+					}
+
 					m_HelpTarget = null;
 					if (inContact)
 						SetState(ARIA_ESquadState.ENGAGING, now);
@@ -430,20 +501,23 @@ class ARIA_GroupBrain
 
 		vector pos = GetPosition();
 		float own = GetOwnStrength();
-		float enemy = m_Memory.GetThreatStrength(pos, cfg.m_fEngageRange);
+		float enemy = m_Memory.GetThreatStrength(pos, cfg.m_fEngageRange, now, cfg.m_fCombatTimeout);
 		float ratio = enemy / Math.Max(own, 0.5);
 
 		// 1. Morale: break contact when the fight is lost
 		if (CheckWithdraw(now))
 			return;
 
-		// 2. Ask for help when outgunned (or when facing armour / aircraft)
-		bool heavyThreat = m_Memory.HasContactOfType(ARIA_EContactType.ARMOR) || m_Memory.HasContactOfType(ARIA_EContactType.AIR);
+		// 2. Ask for help when outgunned (or when facing armour / aircraft) - only for current,
+		//    nearby threats, never for stale radio reports far away
+		bool armor = m_Memory.HasContactOfTypeWithin(ARIA_EContactType.ARMOR, pos, cfg.m_fEngageRange, now, cfg.m_fCombatTimeout);
+		bool air = m_Memory.HasContactOfTypeWithin(ARIA_EContactType.AIR, pos, cfg.m_fEngageRange, now, cfg.m_fCombatTimeout);
+		bool heavyThreat = armor || air;
 		if ((ratio >= 1.0 || heavyThreat) && now - m_fLastHelpRequest >= HELP_REQUEST_INTERVAL)
 		{
 			m_fLastHelpRequest = now;
 			vector enemyPos = pos;
-			m_Memory.GetEnemyCentroid(pos, cfg.m_fEngageRange, enemyPos);
+			m_Memory.GetEnemyCentroid(pos, cfg.m_fEngageRange, enemyPos, now, cfg.m_fCombatTimeout);
 			m_Manager.GetComms().RequestHelp(this, enemyPos, enemy, now);
 		}
 
@@ -479,9 +553,18 @@ class ARIA_GroupBrain
 		if (!cfg.m_bWithdraw || m_eState == ARIA_ESquadState.WITHDRAWING)
 			return false;
 
+		// Just withdrew: only run again if we keep losing men or the enemy is right on top of us
 		vector pos = GetPosition();
+		if (now - m_fLastWithdrawTime < HOLD_DURATION + EVALUATION_INTERVAL)
+		{
+			bool losing = m_Group.GetAgentsCount() < m_iStrengthAtWithdraw;
+			bool pressed = m_Memory.HasFreshContactWithin(pos, DANGER_RADIUS, now, FRESH_CONTACT_AGE);
+			if (!losing && !pressed)
+				return false;
+		}
+
 		float own = GetOwnStrength();
-		float enemy = m_Memory.GetThreatStrength(pos, cfg.m_fEngageRange);
+		float enemy = m_Memory.GetThreatStrength(pos, cfg.m_fEngageRange, now, cfg.m_fCombatTimeout);
 		float ratio = enemy / Math.Max(own, 0.5);
 		float casualties = 1 - (m_Group.GetAgentsCount() / Math.Max(1.0, m_iPeakStrength));
 
@@ -492,13 +575,15 @@ class ARIA_GroupBrain
 			return false;
 
 		vector enemyPos;
-		if (!m_Memory.GetEnemyCentroid(pos, cfg.m_fEngageRange, enemyPos))
+		if (!m_Memory.GetEnemyCentroid(pos, cfg.m_fEngageRange, enemyPos, now, cfg.m_fCombatTimeout))
 			return false;
 
 		vector fallback = ARIA_TacticsPlanner.PlanWithdraw(pos, enemyPos, cfg.m_fWithdrawDistance);
 		if (!IssueMove(fallback, true, EMovementType.SPRINT, true))
 			return false;
 
+		m_fLastWithdrawTime = now;
+		m_iStrengthAtWithdraw = m_Group.GetAgentsCount();
 		SetState(ARIA_ESquadState.WITHDRAWING, now);
 		ARIA_Log.Debug(string.Format("%1 withdrawing (casualties %2, force ratio %3)", GetDebugName(), casualties, ratio));
 
@@ -544,9 +629,14 @@ class ARIA_GroupBrain
 			target = contact.m_vLastKnownPosition;
 
 		if (IssueSearchAndDestroy(target))
+		{
 			SetState(ARIA_ESquadState.ASSAULTING, now);
+		}
 		else
+		{
+			ClearOrder();
 			SetState(ARIA_ESquadState.ENGAGING, now);
+		}
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -557,6 +647,7 @@ class ARIA_GroupBrain
 		ReleaseStaticWeapon();
 		m_HelpTarget = null;
 		m_fFirstContactTime = -1;
+		m_iPeakStrength = m_Group.GetAgentsCount();
 		SetState(ARIA_ESquadState.IDLE, now);
 		if (regroup)
 			ARIA_Log.Debug(GetDebugName() + " combat over, resuming orders");
@@ -595,14 +686,9 @@ class ARIA_GroupBrain
 			return;
 		}
 
-		SCR_AIBoardingParameters boarding = new SCR_AIBoardingParameters();
-		boarding.m_bIsDriverAllowed = false;
-		boarding.m_bIsGunnerAllowed = true;
-		boarding.m_bIsCargoAllowed = false;
-
 		m_Utility.AddUsableVehicle(usage);
 		float priority = SCR_AIActionBase.PRIORITY_ACTIVITY_COMBAT_WITH_VEHICLES + 8;
-		SCR_AIGetInActivity getIn = new SCR_AIGetInActivity(m_Utility, null, weapon, boarding, ECompartmentType.TURRET, priority, SCR_AIActionBase.PRIORITY_LEVEL_NORMAL);
+		SCR_AIGetInActivity getIn = new SCR_AIGetInActivity(m_Utility, null, weapon, GetGunnerOnlyBoarding(), ECompartmentType.TURRET, priority, SCR_AIActionBase.PRIORITY_LEVEL_NORMAL);
 		m_Utility.AddAction(getIn);
 		m_StaticWeapon = weapon;
 		ARIA_Log.Debug(GetDebugName() + " mans static weapon " + ARIA_VehicleUtils.GetDebugName(weapon));
@@ -625,9 +711,47 @@ class ARIA_GroupBrain
 		m_StaticWeapon = null;
 	}
 
+	//------------------------------------------------------------------------------------------------
+	protected static SCR_AIBoardingParameters GetCargoOnlyBoarding()
+	{
+		if (!s_CargoOnlyBoarding)
+		{
+			s_CargoOnlyBoarding = new SCR_AIBoardingParameters();
+			s_CargoOnlyBoarding.m_bIsDriverAllowed = false;
+			s_CargoOnlyBoarding.m_bIsGunnerAllowed = false;
+			s_CargoOnlyBoarding.m_bIsCargoAllowed = true;
+		}
+
+		return s_CargoOnlyBoarding;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	protected static SCR_AIBoardingParameters GetGunnerOnlyBoarding()
+	{
+		if (!s_GunnerOnlyBoarding)
+		{
+			s_GunnerOnlyBoarding = new SCR_AIBoardingParameters();
+			s_GunnerOnlyBoarding.m_bIsDriverAllowed = false;
+			s_GunnerOnlyBoarding.m_bIsGunnerAllowed = true;
+			s_GunnerOnlyBoarding.m_bIsCargoAllowed = false;
+		}
+
+		return s_GunnerOnlyBoarding;
+	}
+
 	//==============================================================================================
 	// Cooperation
 	//==============================================================================================
+
+	//------------------------------------------------------------------------------------------------
+	//! True while moving to help `requester`, or shortly after having arrived there.
+	bool IsHelping(ARIA_GroupBrain requester, float now)
+	{
+		if (m_eState == ARIA_ESquadState.REINFORCING && m_HelpTarget == requester)
+			return true;
+
+		return m_LastHelped == requester && now - m_fHelpArrivalTime < HELP_ARRIVAL_MEMORY;
+	}
 
 	//------------------------------------------------------------------------------------------------
 	//! Idle, healthy, not under direct orders.
@@ -651,6 +775,8 @@ class ARIA_GroupBrain
 		if (!IssueMove(point, false, EMovementType.RUN, useVehicles))
 			return false;
 
+		// Long marches need more time than the default order timeout
+		m_fOrderTimeout = Math.Max(ORDER_TIMEOUT, distance / 2.5 + 60);
 		m_HelpTarget = requester;
 		SetState(ARIA_ESquadState.REINFORCING, now);
 		ARIA_Log.Debug(GetDebugName() + " reinforcing " + requester.GetDebugName());
@@ -726,12 +852,7 @@ class ARIA_GroupBrain
 		if (usage)
 			m_Utility.AddUsableVehicle(usage);
 
-		SCR_AIBoardingParameters boarding = new SCR_AIBoardingParameters();
-		boarding.m_bIsDriverAllowed = false;
-		boarding.m_bIsGunnerAllowed = false;
-		boarding.m_bIsCargoAllowed = true;
-
-		SCR_AIGetInActivity getIn = new SCR_AIGetInActivity(m_Utility, null, helicopter, boarding, ECompartmentType.CARGO, SCR_AIActionBase.PRIORITY_ACTIVITY_GET_IN, SCR_AIActionBase.PRIORITY_LEVEL_PLAYER);
+		SCR_AIGetInActivity getIn = new SCR_AIGetInActivity(m_Utility, null, helicopter, GetCargoOnlyBoarding(), ECompartmentType.CARGO, SCR_AIActionBase.PRIORITY_ACTIVITY_GET_IN, SCR_AIActionBase.PRIORITY_LEVEL_PLAYER);
 		m_Utility.AddAction(getIn);
 		m_Order = getIn;
 	}
@@ -742,17 +863,37 @@ class ARIA_GroupBrain
 	{
 		array<AIAgent> agents = {};
 		m_Group.GetAgents(agents);
+		bool anyAble;
 		foreach (AIAgent agent : agents)
 		{
 			IEntity character = agent.GetControlledEntity();
 			if (!ARIA_EntityUtils.IsAbleCharacter(character))
 				continue;
 
+			anyAble = true;
 			if (ARIA_EntityUtils.GetVehicle(character) != vehicle)
 				return false;
 		}
 
-		return true;
+		return anyAble;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! At least one member can still act (alive and conscious).
+	bool HasAbleMember()
+	{
+		if (!m_Group)
+			return false;
+
+		array<AIAgent> agents = {};
+		m_Group.GetAgents(agents);
+		foreach (AIAgent agent : agents)
+		{
+			if (ARIA_EntityUtils.IsAbleCharacter(agent.GetControlledEntity()))
+				return true;
+		}
+
+		return false;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -771,6 +912,16 @@ class ARIA_GroupBrain
 			if (!character || ARIA_EntityUtils.GetVehicle(character) != helicopter)
 				continue;
 
+			// Wounded / unconscious members cannot climb out: their comrades carry them out
+			if (!ARIA_EntityUtils.IsAbleCharacter(character))
+			{
+				BaseCompartmentSlot slot = ARIA_EntityUtils.GetCompartment(character);
+				if (slot)
+					slot.EjectOccupant(true, true);
+
+				continue;
+			}
+
 			CompartmentAccessComponent access = character.GetCompartmentAccessComponent();
 			if (access)
 				access.GetOutVehicle(EGetOutType.ANIMATED, -1, ECloseDoorAfterActions.INVALID, false);
@@ -781,11 +932,33 @@ class ARIA_GroupBrain
 	//! True when nobody of the squad is left inside the vehicle.
 	bool IsOutOf(IEntity vehicle)
 	{
+		if (!m_Group)
+			return true;
+
 		array<AIAgent> agents = {};
 		m_Group.GetAgents(agents);
 		foreach (AIAgent agent : agents)
 		{
 			if (ARIA_EntityUtils.GetVehicle(agent.GetControlledEntity()) == vehicle)
+				return false;
+		}
+
+		return true;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! Every member that can act is out (incapacitated ones may be stuck inside).
+	bool AreAbleMembersOutOf(IEntity vehicle)
+	{
+		if (!m_Group)
+			return true;
+
+		array<AIAgent> agents = {};
+		m_Group.GetAgents(agents);
+		foreach (AIAgent agent : agents)
+		{
+			IEntity character = agent.GetControlledEntity();
+			if (ARIA_EntityUtils.IsAbleCharacter(character) && ARIA_EntityUtils.GetVehicle(character) == vehicle)
 				return false;
 		}
 
@@ -915,6 +1088,7 @@ class ARIA_GroupBrain
 		SCR_AIMoveActivity activity = new SCR_AIMoveActivity(m_Utility, null, position, null, movement, useVehicles, priority, level);
 		m_Utility.AddAction(activity);
 		m_Order = activity;
+		m_fOrderTimeout = ORDER_TIMEOUT;
 		m_vOrderTarget = position;
 		return true;
 	}
@@ -928,6 +1102,7 @@ class ARIA_GroupBrain
 		SCR_AISearchAndDestroyActivity activity = new SCR_AISearchAndDestroyActivity(m_Utility, null, position, null, EMovementType.RUN, false, priority, SCR_AIActionBase.PRIORITY_LEVEL_NORMAL);
 		m_Utility.AddAction(activity);
 		m_Order = activity;
+		m_fOrderTimeout = ORDER_TIMEOUT;
 		m_vOrderTarget = position;
 		return true;
 	}
@@ -940,7 +1115,8 @@ class ARIA_GroupBrain
 			// Fail() (not SetActionState) so vanilla runs OnActionFailed: soldiers get cancel
 			// messages and reserved seats / group vehicles are released.
 			EAIActionState state = m_Order.GetActionState();
-			if (state != EAIActionState.COMPLETED && state != EAIActionState.FAILED)
+			bool ownerAlive = m_Utility && m_Group && !m_Group.IsDeleted();
+			if (ownerAlive && state != EAIActionState.COMPLETED && state != EAIActionState.FAILED)
 				m_Order.Fail();
 		}
 
@@ -970,7 +1146,7 @@ class ARIA_GroupBrain
 	//------------------------------------------------------------------------------------------------
 	protected bool IsOrderTimedOut(float now)
 	{
-		return now - m_fStateTime > ORDER_TIMEOUT;
+		return now - m_fStateTime > m_fOrderTimeout;
 	}
 
 	//------------------------------------------------------------------------------------------------

@@ -117,6 +117,11 @@ class ARIA_EntityUtils
 		if (!access)
 			return null;
 
+		// Turret / cargo-frame seats live on child entities: report the vehicle itself
+		BaseCompartmentSlot slot = access.GetCompartment();
+		if (slot)
+			return slot.GetVehicle();
+
 		return access.GetVehicleCompartmentManagerOwner();
 	}
 

@@ -32,6 +32,11 @@ class ARIA_Manager
 	protected int m_iVehicleCursor;
 
 	protected static const float DISCOVERY_INTERVAL = 3.0;
+	protected static const float CREW_SCAN_INTERVAL = 1.0;
+
+	protected float m_fCrewScanTimer;
+	protected bool m_bSquadsWereActive = true;
+	protected bool m_bVehiclesWereActive = true;
 
 	//------------------------------------------------------------------------------------------------
 	//! Creates the manager. Call on the server only.
@@ -119,24 +124,31 @@ class ARIA_Manager
 
 	//------------------------------------------------------------------------------------------------
 	//! Re-reads the settings file (admin command "#aria reload").
-	void ReloadSettings()
+	//! Returns false (and keeps the live settings) when the file cannot be read.
+	bool ReloadSettings()
 	{
-		ARIA_Settings settings = ARIA_SettingsIO.Load();
+		ARIA_Settings settings = ARIA_SettingsIO.TryLoad();
+		if (!settings)
+			return false;
+
 		ApplySettings(settings);
+		return true;
 	}
 
 	//------------------------------------------------------------------------------------------------
 	void ApplySettings(ARIA_Settings settings)
 	{
 		m_Settings = settings;
-		ARIA_Log.s_eLevel = settings.m_iLogLevel;
 		OnSettingsChanged();
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Propagates runtime setting changes to live brains.
+	//! Propagates runtime setting changes to live brains. Switching a subsystem off undoes what
+	//! ARIA changed in vanilla AI instead of freezing brains in the middle of an order.
 	void OnSettingsChanged()
 	{
+		ARIA_Log.s_eLevel = m_Settings.m_iLogLevel;
+
 		foreach (ARIA_GroupBrain brain : m_aGroups)
 		{
 			brain.OnSettingsChanged();
@@ -146,6 +158,51 @@ class ARIA_Manager
 		{
 			pilot.OnSettingsChanged();
 		}
+
+		bool squads = AreSquadsActive();
+		if (m_bSquadsWereActive && !squads)
+		{
+			foreach (ARIA_GroupBrain brain : m_aGroups)
+			{
+				if (brain.IsValid())
+					brain.StandDown(m_fTime);
+			}
+
+			ARIA_Log.Info("Squad AI switched off");
+		}
+
+		bool vehicles = AreVehiclesActive();
+		if (m_bVehiclesWereActive && !vehicles)
+		{
+			foreach (ARIA_VehicleBrain vehicleBrain : m_aVehicles)
+			{
+				vehicleBrain.Release();
+			}
+
+			m_aVehicles.Clear();
+			ARIA_Log.Info("Vehicle AI switched off");
+		}
+
+		m_bSquadsWereActive = squads;
+		m_bVehiclesWereActive = vehicles;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool AreSquadsActive()
+	{
+		return m_Settings.m_bEnabled && m_Settings.m_Squad.m_bEnabled;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool AreVehiclesActive()
+	{
+		return m_Settings.m_bEnabled && m_Settings.m_Vehicles.m_bEnabled;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool AreHelicoptersActive()
+	{
+		return m_Settings.m_bEnabled && m_Settings.m_Heli.m_bEnabled;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -166,6 +223,19 @@ class ARIA_Manager
 			Cleanup();
 		}
 
+		// Crewed vehicles / helicopters are picked up quickly (a helicopter placed in the air
+		// must not fall for seconds before its AI pilot takes over)
+		m_fCrewScanTimer -= dt;
+		if (m_fCrewScanTimer <= 0)
+		{
+			m_fCrewScanTimer = CREW_SCAN_INTERVAL;
+			foreach (ARIA_GroupBrain brain : m_aGroups)
+			{
+				if (brain.IsValid())
+					DiscoverCrewedVehicles(brain);
+			}
+		}
+
 		m_Comms.Update(m_fTime);
 		UpdateGroups();
 		UpdateVehicles();
@@ -176,7 +246,7 @@ class ARIA_Manager
 	//------------------------------------------------------------------------------------------------
 	protected void UpdateGroups()
 	{
-		if (!m_Settings.m_Squad.m_bEnabled)
+		if (!AreSquadsActive())
 			return;
 
 		int count = m_aGroups.Count();
@@ -199,7 +269,7 @@ class ARIA_Manager
 	//------------------------------------------------------------------------------------------------
 	protected void UpdateVehicles()
 	{
-		if (!m_Settings.m_Vehicles.m_bEnabled)
+		if (!AreVehiclesActive())
 			return;
 
 		int count = m_aVehicles.Count();
@@ -224,7 +294,7 @@ class ARIA_Manager
 	{
 		// Pilots keep flying even when helicopters get disabled at runtime: they land first,
 		// then hand the airframe back (dropping them mid-air would crash every helicopter).
-		bool enabled = m_Settings.m_Heli.m_bEnabled;
+		bool enabled = AreHelicoptersActive();
 		foreach (ARIA_HeliPilot pilot : m_aHelis)
 		{
 			if (!pilot.IsValid())
@@ -258,13 +328,8 @@ class ARIA_Manager
 
 			ARIA_GroupBrain brain = new ARIA_GroupBrain(this, group);
 			m_aGroups.Insert(brain);
+			DiscoverCrewedVehicles(brain);
 			ARIA_Log.Debug("Managing group " + brain.GetDebugName());
-		}
-
-		foreach (ARIA_GroupBrain brain : m_aGroups)
-		{
-			if (brain.IsValid())
-				DiscoverCrewedVehicles(brain);
 		}
 	}
 
@@ -282,7 +347,7 @@ class ARIA_Manager
 
 			if (ARIA_VehicleUtils.IsHelicopter(vehicle))
 			{
-				if (m_Settings.m_Heli.m_bEnabled && !FindHeliPilot(vehicle) && !WasRecentlyReleased(vehicle) && ARIA_VehicleUtils.IsPilotOf(character, vehicle))
+				if (AreHelicoptersActive() && !FindHeliPilot(vehicle) && !WasRecentlyReleased(vehicle) && ARIA_VehicleUtils.IsPilotOf(character, vehicle))
 				{
 					ARIA_HeliPilot pilot = new ARIA_HeliPilot(this, vehicle, brain);
 					if (pilot.IsValid())
@@ -295,7 +360,7 @@ class ARIA_Manager
 				continue;
 			}
 
-			if (m_Settings.m_Vehicles.m_bEnabled && !FindVehicleBrain(vehicle) && !ARIA_VehicleUtils.IsStaticWeapon(vehicle))
+			if (AreVehiclesActive() && !FindVehicleBrain(vehicle) && !ARIA_VehicleUtils.IsStaticWeapon(vehicle))
 			{
 				ARIA_VehicleBrain vehicleBrain = new ARIA_VehicleBrain(this, vehicle, brain);
 				m_aVehicles.Insert(vehicleBrain);
@@ -305,15 +370,22 @@ class ARIA_Manager
 	}
 
 	//------------------------------------------------------------------------------------------------
-	protected bool ShouldManageGroup(SCR_AIGroup group)
+	//! Also re-checked for managed groups: AI recruited by players (slave groups) or a newly
+	//! excluded faction are handed back to vanilla.
+	bool ShouldManageGroup(SCR_AIGroup group)
 	{
-		if (group.IsDormant())
+		if (!group || group.IsDormant())
 			return false;
 
-		if (group.GetPlayerCount() > 0 && !m_Settings.m_Squad.m_bAffectPlayerLedGroups)
+		if (!m_Settings.m_Squad.m_bAffectPlayerLedGroups && (group.IsSlave() || group.GetPlayerCount(true) > 0))
 			return false;
 
-		if (m_Settings.IsFactionExcluded(group.GetFactionName()))
+		string factionKey = group.GetFactionName();
+		Faction faction = group.GetFaction();
+		if (faction)
+			factionKey = faction.GetFactionKey();
+
+		if (m_Settings.IsFactionExcluded(factionKey))
 			return false;
 
 		return group.GetAgentsCount() > 0;
@@ -350,14 +422,25 @@ class ARIA_Manager
 		for (int i = m_aVehicles.Count() - 1; i >= 0; i--)
 		{
 			if (!m_aVehicles[i].IsValid())
+			{
+				m_aVehicles[i].Release();
 				m_aVehicles.Remove(i);
+			}
 		}
 
 		for (int i = m_aGroups.Count() - 1; i >= 0; i--)
 		{
 			ARIA_GroupBrain brain = m_aGroups[i];
-			if (brain.IsValid())
+			bool keep = brain.IsValid() && ShouldManageGroup(brain.GetGroup());
+			if (keep)
 				continue;
+
+			// Never let go of a squad in the middle of a flight
+			if (brain.IsValid() && brain.IsBusyInAir())
+				continue;
+
+			if (brain.IsValid())
+				ARIA_Log.Debug("Handing " + brain.GetDebugName() + " back to vanilla AI");
 
 			brain.Release();
 			m_aGroups.Remove(i);
@@ -381,6 +464,11 @@ class ARIA_Manager
 		foreach (ARIA_GroupBrain brain : m_aGroups)
 		{
 			brain.Release();
+		}
+
+		foreach (ARIA_VehicleBrain vehicleBrain : m_aVehicles)
+		{
+			vehicleBrain.Release();
 		}
 
 		m_aHelis.Clear();

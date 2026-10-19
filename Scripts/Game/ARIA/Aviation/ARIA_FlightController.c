@@ -128,8 +128,9 @@ class ARIA_FlightController
 		float kp = m_Settings.m_fVelocityGain;
 		float ki = m_Settings.m_fVelocityIntegral;
 		m_VelocityPID = new ARIA_VectorPID(kp, ki, 0, 6, m_Settings.m_fMaxAccel * 2);
-		// Vertical axis needs a stronger integral: it absorbs the unknown native rotor lift.
-		m_VelocityPID.SetVerticalGains(kp * 1.4, ki * 2.0, 0, 12, ARIA_Math.GRAVITY);
+		// Vertical axis needs a stronger integral (absorbs unknown lift) and up to 2 g of authority
+		// so a helicopter adopted while falling can still arrest its sink.
+		m_VelocityPID.SetVerticalGains(kp * 1.4, ki * 2.0, 0, 12, ARIA_Math.GRAVITY * 2);
 	}
 
 	//------------------------------------------------------------------------------------------------

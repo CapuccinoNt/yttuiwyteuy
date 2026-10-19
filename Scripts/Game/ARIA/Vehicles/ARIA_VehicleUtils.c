@@ -234,6 +234,20 @@ class ARIA_VehicleUtils
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Not destroyed, engine working and hull above the bail-out threshold.
+	static bool IsDrivable(IEntity vehicle, float minHealth)
+	{
+		if (!vehicle || ARIA_EntityUtils.IsDeadOrDestroyed(vehicle))
+			return false;
+
+		SCR_VehicleDamageManagerComponent damage = SCR_VehicleDamageManagerComponent.Cast(vehicle.FindComponent(SCR_VehicleDamageManagerComponent));
+		if (damage && !damage.GetEngineFunctional())
+			return false;
+
+		return ARIA_EntityUtils.GetHealthScaled(vehicle) > minHealth;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	static bool IsUpsideDown(IEntity vehicle)
 	{
 		vector up = vehicle.GetWorldTransformAxis(1);
@@ -376,6 +390,15 @@ class ARIA_VehicleUtils
 	protected static bool IsUsableFreeVehicle(IEntity vehicle, Faction faction, int seatsNeeded)
 	{
 		if (IsClaimed(vehicle) || IsHelicopter(vehicle) || ARIA_EntityUtils.IsDeadOrDestroyed(vehicle))
+			return false;
+
+		// Never pick up a vehicle that ARIA itself would bail out of
+		ARIA_Manager manager = ARIA_Manager.GetInstance();
+		float minHealth = 0.25;
+		if (manager)
+			minHealth = manager.GetSettings().m_Vehicles.m_fBailOutHealth;
+
+		if (!IsDrivable(vehicle, minHealth))
 			return false;
 
 		SCR_AIVehicleUsageComponent usage = GetUsageComponent(vehicle);

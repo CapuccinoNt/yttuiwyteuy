@@ -59,10 +59,6 @@ class ARIA_AdminCommand : ScrServerCommand
 	//------------------------------------------------------------------------------------------------
 	protected ScrServerCmdResult Execute(array<string> argv)
 	{
-		ARIA_Manager manager = ARIA_Manager.GetInstance();
-		if (!manager)
-			return ScrServerCmdResult("ARIA is not running (disabled in settings or not the server)", EServerCmdResultType.ERR);
-
 		// argv[0] is the command keyword itself
 		string sub;
 		if (argv.Count() > 1)
@@ -70,12 +66,28 @@ class ARIA_AdminCommand : ScrServerCommand
 
 		sub.ToLower();
 
+		ARIA_Manager manager = ARIA_Manager.GetInstance();
+		if (!manager)
+		{
+			// Disabled at boot: '#aria reload' after enabling it in the file starts ARIA
+			if (sub == "reload")
+			{
+				ARIA_Manager.Start();
+				if (ARIA_Manager.GetInstance())
+					return ScrServerCmdResult("ARIA started", EServerCmdResultType.OK);
+			}
+
+			return ScrServerCmdResult("ARIA is not running (general.enabled = false in the settings file, or not the server)", EServerCmdResultType.ERR);
+		}
+
 		if (sub == "status")
 			return ScrServerCmdResult(BuildStatus(manager), EServerCmdResultType.OK);
 
 		if (sub == "reload")
 		{
-			manager.ReloadSettings();
+			if (!manager.ReloadSettings())
+				return ScrServerCmdResult("Could not read " + ARIA_SettingsIO.FILE_PATH + ", live settings kept", EServerCmdResultType.ERR);
+
 			return ScrServerCmdResult("ARIA settings reloaded", EServerCmdResultType.OK);
 		}
 
@@ -92,11 +104,15 @@ class ARIA_AdminCommand : ScrServerCommand
 			if (argv.Count() < 4)
 				return ScrServerCmdResult("Usage: #aria set <key> <value>", EServerCmdResultType.PARAMETERS);
 
+			// A preset is a baseline for the whole file, it cannot be swapped value by value
+			if (argv[2] == "general.preset")
+				return ScrServerCmdResult("Change general.preset in " + ARIA_SettingsIO.FILE_PATH + " and run '#aria reload'", EServerCmdResultType.ERR);
+
 			if (!ARIA_SettingsIO.ApplyOne(manager.GetSettings(), argv[2], argv[3]))
-				return ScrServerCmdResult("Unknown setting: " + argv[2], EServerCmdResultType.ERR);
+				return ScrServerCmdResult("Unknown setting or invalid value: " + argv[2] + " " + argv[3], EServerCmdResultType.ERR);
 
 			manager.OnSettingsChanged();
-			return ScrServerCmdResult(argv[2] + " = " + argv[3], EServerCmdResultType.OK);
+			return ScrServerCmdResult(argv[2] + " = " + ARIA_SettingsIO.GetValueText(manager.GetSettings(), argv[2]), EServerCmdResultType.OK);
 		}
 
 		return ScrServerCmdResult("#aria status | reload | save | set <key> <value>", EServerCmdResultType.OK);

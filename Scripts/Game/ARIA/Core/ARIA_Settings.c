@@ -376,6 +376,19 @@ class ARIA_Settings
 	//! Per-faction profiles are discovered from keys like "skill.USSR.skill".
 	protected void VisitFactionSkills(ARIA_ConfigVisitor v)
 	{
+		if (v.GetMode() == ARIA_EConfigMode.SET_ONE)
+		{
+			array<string> setParts = {};
+			v.GetSetKey().Split(".", setParts, true);
+			if (setParts.Count() >= 3 && setParts[0] == "skill" && setParts[1] != "default" && !FindFactionSkill(setParts[1]))
+			{
+				ARIA_SkillProfile created = new ARIA_SkillProfile();
+				created.m_sFactionKey = setParts[1];
+				created.CopyFrom(m_DefaultSkill);
+				m_aFactionSkills.Insert(created);
+			}
+		}
+
 		if (v.GetMode() == ARIA_EConfigMode.LOAD)
 		{
 			array<string> keys = {};

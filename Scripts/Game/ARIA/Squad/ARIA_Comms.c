@@ -15,6 +15,7 @@ class ARIA_IntelReport
 	IEntity m_Enemy;
 	vector m_vPosition;
 	ARIA_EContactType m_eType;
+	float m_fSeenTime;			//!< when the sender actually saw the enemy (ARIA time)
 }
 
 //------------------------------------------------------------------------------------------------
@@ -24,6 +25,7 @@ class ARIA_Comms
 	protected ref array<ref ARIA_IntelReport> m_aPending = {};
 
 	protected static const int MAX_PENDING = 512;
+	protected static const float MAX_INTEL_AGE = 30;
 
 	//------------------------------------------------------------------------------------------------
 	void ARIA_Comms(ARIA_Manager manager)
@@ -57,6 +59,7 @@ class ARIA_Comms
 			report.m_Enemy = contact.m_Entity;
 			report.m_vPosition = contact.m_vLastKnownPosition;
 			report.m_eType = contact.m_eType;
+			report.m_fSeenTime = contact.m_fLastSeenTime;
 			m_aPending.Insert(report);
 		}
 
@@ -71,7 +74,9 @@ class ARIA_Comms
 		ARIA_SquadSettings cfg = m_Manager.GetSettings().m_Squad;
 		int answered = 0;
 
-		if (cfg.m_bReinforcements && cfg.m_iMaxReinforcingGroups > 0)
+		// Squads already on their way (or recently arrived) count against the limit
+		int slots = cfg.m_iMaxReinforcingGroups - CountHelpersOf(requester, now);
+		if (cfg.m_bReinforcements && slots > 0)
 		{
 			array<ARIA_GroupBrain> candidates = {};
 			m_Manager.FindFriendlyGroups(requester.GetFaction(), requester.GetPosition(), cfg.m_fReinforceRadius, requester, candidates);
@@ -80,7 +85,7 @@ class ARIA_Comms
 			SortByDistance(candidates, requester.GetPosition());
 			foreach (ARIA_GroupBrain candidate : candidates)
 			{
-				if (answered >= cfg.m_iMaxReinforcingGroups)
+				if (answered >= slots)
 					break;
 
 				if (!candidate.CanReinforce())
@@ -106,6 +111,19 @@ class ARIA_Comms
 	}
 
 	//------------------------------------------------------------------------------------------------
+	protected int CountHelpersOf(ARIA_GroupBrain requester, float now)
+	{
+		int count = 0;
+		foreach (ARIA_GroupBrain brain : m_Manager.GetGroupBrains())
+		{
+			if (brain.IsValid() && brain.IsHelping(requester, now))
+				count++;
+		}
+
+		return count;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	void Update(float now)
 	{
 		for (int i = m_aPending.Count() - 1; i >= 0; i--)
@@ -114,8 +132,10 @@ class ARIA_Comms
 			if (report.m_fDeliverTime > now)
 				continue;
 
-			if (report.m_Recipient && report.m_Recipient.IsValid() && report.m_Enemy)
-				report.m_Recipient.ReceiveIntel(report.m_Enemy, report.m_vPosition, report.m_eType, now);
+			// Stale intel is dropped instead of being re-stamped as fresh (ghost contacts)
+			bool fresh = now - report.m_fSeenTime <= MAX_INTEL_AGE;
+			if (fresh && report.m_Recipient && report.m_Recipient.IsValid() && report.m_Enemy)
+				report.m_Recipient.ReceiveIntel(report.m_Enemy, report.m_vPosition, report.m_eType, report.m_fSeenTime, now);
 
 			m_aPending.Remove(i);
 		}

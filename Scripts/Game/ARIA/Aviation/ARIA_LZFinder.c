@@ -20,8 +20,12 @@ class ARIA_LZSearch
 	protected bool m_bFound;
 	protected vector m_vResult;
 
-	protected static const float RING_STEP = 20;
-	protected static const int CANDIDATES_PER_STEP = 3;
+	protected static const float MIN_RING_STEP = 20;
+	protected static const int CANDIDATES_PER_STEP = 4;
+	protected static const int MAX_CANDIDATES = 250;
+
+	protected float m_fRingStep = MIN_RING_STEP;
+	protected int m_iEvaluated;
 
 	//------------------------------------------------------------------------------------------------
 	void ARIA_LZSearch(vector center, float maxRadius, float clearRadius, float maxSlopeDeg, IEntity exclude)
@@ -31,6 +35,9 @@ class ARIA_LZSearch
 		m_fClearRadius = clearRadius;
 		m_fMaxSlope = maxSlopeDeg;
 		m_Exclude = exclude;
+
+		// Coarser rings for big searches keep the total cost bounded
+		m_fRingStep = Math.Max(MIN_RING_STEP, maxRadius / 10);
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -79,12 +86,13 @@ class ARIA_LZSearch
 		for (int n = 0; n < CANDIDATES_PER_STEP; n++)
 		{
 			vector candidate;
-			if (!NextCandidate(candidate))
+			if (m_iEvaluated >= MAX_CANDIDATES || !NextCandidate(candidate))
 			{
 				m_bDone = true;
 				return true;
 			}
 
+			m_iEvaluated++;
 			if (IsSuitable(candidate))
 			{
 				m_vResult = ARIA_WorldQuery.SnapToGround(candidate);
@@ -111,7 +119,7 @@ class ARIA_LZSearch
 	//------------------------------------------------------------------------------------------------
 	protected bool NextCandidate(out vector candidate)
 	{
-		float radius = m_iRing * RING_STEP;
+		float radius = m_iRing * m_fRingStep;
 		if (radius > m_fMaxRadius)
 			return false;
 

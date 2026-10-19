@@ -142,18 +142,56 @@ class ARIA_ThreatMemory
 	}
 
 	//------------------------------------------------------------------------------------------------
-	//! Sum of threat weights of contacts within range of a position.
-	float GetThreatStrength(vector from, float range)
+	//! Sum of threat weights of contacts within range that were seen in the last maxAge seconds.
+	//! Older contacts fade out linearly so forgotten enemies do not keep a squad in combat.
+	float GetThreatStrength(vector from, float range, float now, float maxAge)
 	{
 		float sum = 0;
 		float rangeSq = range * range;
 		foreach (ARIA_Contact contact : m_aContacts)
 		{
-			if (vector.DistanceSq(from, contact.m_vLastKnownPosition) <= rangeSq)
-				sum += contact.GetThreatWeight();
+			float age = contact.GetAge(now);
+			if (age > maxAge || vector.DistanceSq(from, contact.m_vLastKnownPosition) > rangeSq)
+				continue;
+
+			float freshness = 1 - 0.5 * (age / Math.Max(maxAge, 1));
+			sum += contact.GetThreatWeight() * freshness;
 		}
 
 		return sum;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	bool HasContactOfTypeWithin(ARIA_EContactType type, vector from, float range, float now, float maxAge)
+	{
+		float rangeSq = range * range;
+		foreach (ARIA_Contact contact : m_aContacts)
+		{
+			if (contact.m_eType != type || contact.GetAge(now) > maxAge)
+				continue;
+
+			if (vector.DistanceSq(from, contact.m_vLastKnownPosition) <= rangeSq)
+				return true;
+		}
+
+		return false;
+	}
+
+	//------------------------------------------------------------------------------------------------
+	//! A first-hand (not radio) contact seen within maxAge seconds closer than radius.
+	bool HasFreshContactWithin(vector from, float radius, float now, float maxAge)
+	{
+		float radiusSq = radius * radius;
+		foreach (ARIA_Contact contact : m_aContacts)
+		{
+			if (contact.m_bReported || contact.GetAge(now) > maxAge)
+				continue;
+
+			if (vector.DistanceSq(from, contact.m_vLastKnownPosition) <= radiusSq)
+				return true;
+		}
+
+		return false;
 	}
 
 	//------------------------------------------------------------------------------------------------
@@ -205,7 +243,7 @@ class ARIA_ThreatMemory
 
 	//------------------------------------------------------------------------------------------------
 	//! Threat-weighted centre of the known enemy positions within range.
-	bool GetEnemyCentroid(vector from, float range, out vector centroid)
+	bool GetEnemyCentroid(vector from, float range, out vector centroid, float now = -1, float maxAge = -1)
 	{
 		float rangeSq = range * range;
 		float total = 0;
@@ -213,6 +251,9 @@ class ARIA_ThreatMemory
 		foreach (ARIA_Contact contact : m_aContacts)
 		{
 			if (vector.DistanceSq(from, contact.m_vLastKnownPosition) > rangeSq)
+				continue;
+
+			if (maxAge >= 0 && contact.GetAge(now) > maxAge)
 				continue;
 
 			float w = contact.GetThreatWeight();

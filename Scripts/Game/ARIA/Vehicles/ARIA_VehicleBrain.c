@@ -33,6 +33,7 @@ class ARIA_VehicleBrain
 	protected bool m_bDismounted;
 	protected bool m_bBailedOut;
 	protected bool m_bConvoyCapped;
+	protected bool m_bAbandoned;		//!< recovery gave up: no more shoves for this vehicle
 
 	protected static const int MAX_RECOVERY_ATTEMPTS = 3;
 	protected static const float RECOVERY_DURATION = 1.6;
@@ -67,6 +68,20 @@ class ARIA_VehicleBrain
 	}
 
 	//------------------------------------------------------------------------------------------------
+	//! Undo ARIA's changes to the vehicle (convoy speed cap).
+	void Release()
+	{
+		if (!m_bConvoyCapped || !m_Vehicle)
+			return;
+
+		AICarMovementComponent movement = AICarMovementComponent.Cast(m_Vehicle.FindComponent(AICarMovementComponent));
+		if (movement)
+			movement.ResetCruiseSpeed();
+
+		m_bConvoyCapped = false;
+	}
+
+	//------------------------------------------------------------------------------------------------
 	bool IsThinkDue(float now)
 	{
 		return now >= m_fNextThink;
@@ -92,7 +107,7 @@ class ARIA_VehicleBrain
 		if (cfg.m_bFlipRecovery)
 			UpdateFlipRecovery(now);
 
-		if (cfg.m_bStuckRecovery)
+		if (cfg.m_bStuckRecovery && !m_bAbandoned)
 			UpdateStuckRecovery(now);
 
 		UpdateCombatDrills(now);
@@ -210,7 +225,7 @@ class ARIA_VehicleBrain
 
 		SCR_AIVehicleUsageComponent usage = ARIA_VehicleUtils.GetUsageComponent(m_Vehicle);
 		SCR_AIGroupUtilityComponent utility = m_Owner.GetUtility();
-		if (usage && utility && !ARIA_EntityUtils.IsDeadOrDestroyed(m_Vehicle))
+		if (usage && utility && ARIA_VehicleUtils.IsDrivable(m_Vehicle, m_Manager.GetSettings().m_Vehicles.m_fBailOutHealth))
 			utility.AddUsableVehicle(usage);
 	}
 
@@ -358,13 +373,17 @@ class ARIA_VehicleBrain
 
 		if (m_iRecoveryAttempts > MAX_RECOVERY_ATTEMPTS)
 		{
-			// Give up like vanilla does: the squad leaves the vehicle and walks
-			SCR_AIVehicleUsageComponent usage = ARIA_VehicleUtils.GetUsageComponent(m_Vehicle);
+			// Give up like vanilla does: the squad gets out and walks
 			SCR_AIGroupUtilityComponent utility = m_Owner.GetUtility();
-			if (usage && utility)
-				utility.RemoveUsableVehicle(usage);
+			if (utility)
+			{
+				SCR_AIGetOutActivity getOut = new SCR_AIGetOutActivity(utility, null, m_Vehicle, null, SCR_AIActionBase.PRIORITY_ACTIVITY_GET_OUT + 30, SCR_AIActionBase.PRIORITY_LEVEL_NORMAL);
+				utility.AddAction(getOut);
+			}
 
-			m_iRecoveryAttempts = 0;
+			m_bAbandoned = true;
+			m_bDismounted = true;
+			m_bBailedOut = true; // never hand this vehicle back after the fight
 			ARIA_Log.Debug("Vehicle abandoned after failed recovery: " + ARIA_VehicleUtils.GetDebugName(m_Vehicle));
 			return;
 		}
@@ -407,12 +426,29 @@ class ARIA_VehicleBrain
 		if (!physics || physics.GetVelocity().Length() > cfg.m_fStuckSpeed)
 			return false;
 
+		// Real throttle input of whatever simulation the vehicle uses; "engine on" is NOT driving
+		float throttle = -1;
 		VehicleWheeledSimulation wheeled = ARIA_VehicleUtils.GetWheeledSimulation(m_Vehicle);
 		if (wheeled)
-			return wheeled.GetThrottle() > 0.3;
+		{
+			throttle = wheeled.GetThrottle();
+		}
+		else
+		{
+			VehicleTrackedSimulation tracked = VehicleTrackedSimulation.Cast(m_Vehicle.FindComponent(VehicleTrackedSimulation));
+			if (tracked)
+			{
+				throttle = tracked.GetThrottle();
+			}
+			else
+			{
+				VehicleWheeledSimulation_SA_B legacy = VehicleWheeledSimulation_SA_B.Cast(m_Vehicle.FindComponent(VehicleWheeledSimulation_SA_B));
+				if (legacy)
+					throttle = legacy.GetThrottle();
+			}
+		}
 
-		VehicleControllerComponent controller = VehicleControllerComponent.Cast(m_Vehicle.FindComponent(VehicleControllerComponent));
-		return controller && controller.IsEngineOn();
+		return throttle > 0.3;
 	}
 
 	//==============================================================================================
